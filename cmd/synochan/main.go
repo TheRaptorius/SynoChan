@@ -209,13 +209,15 @@ func runDaemon(args []string) int {
 	return 0
 }
 
-// standalone serves the embedded UI and maps the CGI style "api.cgi?path=x" calls to "/api/x",
+// standalone serves the embedded UI and maps the CGI style "app/api.cgi?path=x" calls to "/api/x",
 // so the same UI works outside DSM.
 func standalone(api http.Handler) http.Handler {
 	static := http.FileServerFS(web.Static())
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/api.cgi":
+		case r.URL.Path == "/":
+			http.Redirect(w, r, "/app/", http.StatusFound)
+		case strings.HasSuffix(r.URL.Path, "/api.cgi"):
 			q := r.URL.Query()
 			p := q.Get("path")
 			q.Del("path")

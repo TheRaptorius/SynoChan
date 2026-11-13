@@ -46,7 +46,7 @@ build 386 386 GO386=softfloat
 mkdir -p "$TARGET/ui"
 cp -R web/static/. "$TARGET/ui/"
 cp package/ui/config "$TARGET/ui/config"
-install -m 0755 package/ui/api.cgi "$TARGET/ui/api.cgi"
+install -m 0755 package/ui/api.cgi "$TARGET/ui/app/api.cgi"
 cp LICENSE NOTICE "$TARGET/"
 
 # 3. package.tgz
