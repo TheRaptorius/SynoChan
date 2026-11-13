@@ -1,5 +1,6 @@
 #!/bin/sh
 . "$(dirname "$0")/common"
+remove_obsolete_files
 select_binary || exit 1
 mkdir -p "$PKG_VAR"
 exit 0

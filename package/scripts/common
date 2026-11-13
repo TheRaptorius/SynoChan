@@ -34,6 +34,14 @@ select_binary() {
     return 0
 }
 
+# Files earlier versions put in ui/. DSM keeps them on upgrade, and it loads ui/style.css into its own
+# pages, so a stale one restyles all of DSM. Never ship a ui/style.css.
+remove_obsolete_files() {
+    for f in ui/style.css ui/app.js ui/index.html ui/api.cgi; do
+        rm -f "$PKG_DEST/$f"
+    done
+}
+
 is_running() {
     [ -f "$PID_FILE" ] || return 1
     pid="$(cat "$PID_FILE" 2>/dev/null)"

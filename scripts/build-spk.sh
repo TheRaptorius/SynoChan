@@ -49,6 +49,11 @@ cp package/ui/config package/ui/SynoChan.js "$TARGET/ui/"
 cp -R package/ui/texts "$TARGET/ui/texts"
 install -m 0755 package/ui/api.cgi "$TARGET/ui/app/api.cgi"
 cp LICENSE NOTICE "$TARGET/"
+# DSM loads ui/style.css into its own pages; a file there would restyle all of DSM.
+if [ -e "$TARGET/ui/style.css" ]; then
+    echo "ui/style.css must not exist (DSM loads it globally)" >&2
+    exit 1
+fi
 
 # 3. package.tgz
 PKGDIR="$WORK/spk"
