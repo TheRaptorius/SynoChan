@@ -20,15 +20,28 @@ Ext.apply(SYNO.SDS.SynoChan.Utils, function () {
             return "";
         },
 
-        getMainHtml: function () {
+        getMainURL: function () {
             // The timestamp keeps DSM and the browser from serving a cached page after an update.
             var src = "/webman/3rdparty/synochan/app/index.html?_ts=" + new Date().getTime();
             var token = SYNO.SDS.SynoChan.Utils.getSynoToken();
             if (token) {
                 src += "&SynoToken=" + encodeURIComponent(token);
             }
-            return '<iframe src="' + src + '" title="SynoChan" ' +
-                'style="width: 100%; height: 100%; border: none; margin: 0"></iframe>';
+            return src;
+        },
+
+        // The iframe is a component, so the window's fit layout sets its pixel size on every resize and
+        // maximize. Plain html content would keep the size it had when the window opened.
+        createFrame: function () {
+            return new Ext.BoxComponent({
+                autoEl: {
+                    tag: "iframe",
+                    src: SYNO.SDS.SynoChan.Utils.getMainURL(),
+                    title: "SynoChan",
+                    frameborder: "0",
+                    style: "display: block; border: 0; margin: 0;"
+                }
+            });
         }
     };
 }());
@@ -47,8 +60,8 @@ Ext.define("SYNO.SDS.SynoChan.MainWindow", {
     constructor: function (config) {
         var ns = SYNO.SDS.SynoChan;
         this.appInstance = config.appInstance;
-        // Matches the window configuration of packages known to work on DSM 7.2+ ("syno-app-win" is the class
-        // DSM's own app windows use). Custom classes and min sizes were dropped while tracking down resize errors.
+        // Window options match packages known to work on DSM 7.2+ ("syno-app-win" is the class DSM's own app
+        // windows use).
         ns.MainWindow.superclass.constructor.call(this, Ext.apply({
             layout: "fit",
             resizable: true,
@@ -57,7 +70,7 @@ Ext.define("SYNO.SDS.SynoChan.MainWindow", {
             minimizable: true,
             width: 1040,
             height: 660,
-            html: ns.Utils.getMainHtml()
+            items: [ns.Utils.createFrame()]
         }, config));
         ns.Utils.ApplicationWindow = this;
     },

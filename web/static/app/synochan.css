@@ -119,7 +119,8 @@ html.synochan .menu[hidden] { display: none; }
 html.synochan .menu button { border: 0; text-align: left; background: transparent; padding: 6px 10px; border-radius: var(--radius-s); }
 html.synochan .menu button:hover, html.synochan .menu button:focus-visible { background: var(--leaf-faint); }
 html.synochan .menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
-html.synochan .menu.context { position: fixed; }
+html.synochan .menu.context { position: fixed; right: auto; top: auto; max-width: min(320px, calc(100vw - 12px)); }
+html.synochan .menu button { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Tabs */
 html.synochan .tabs {

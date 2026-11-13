@@ -239,8 +239,9 @@
       folderBtn.innerHTML = ICONS.folder;
       const moreBtn = el('button', { type: 'button', title: 'More actions', 'aria-haspopup': 'menu', onclick: (e) => {
         e.stopPropagation();
-        if (!sel.has(x.key)) { sel.clear(); sel.add(x.key); render(); }
+        // Measured before re-rendering, which replaces this button.
         const r = e.currentTarget.getBoundingClientRect();
+        if (!sel.has(x.key)) { sel.clear(); sel.add(x.key); render(); }
         showContextMenu(x, r.right, r.bottom);
       } });
       moreBtn.innerHTML = ICONS.more;
@@ -535,7 +536,7 @@
   });
 
   function openFolder(x) {
-    const share = x.share_path;
+    const share = x.share_path ? x.share_path.replace(/\/*$/, '/') : '';
     try {
       const top = window.top;
       if (share && top.SYNO && top.SYNO.SDS && typeof top.SYNO.SDS.AppLaunch === 'function') {
@@ -609,10 +610,13 @@
       entries.push(btn(state.tab === 'threads' ? 'Remove thread' : 'Remove board', () => removeItems([x]), { class: 'danger' }));
     }
     menu.replaceChildren(...entries);
+    // Measure at the top left first, so the size is not affected by a previous position.
+    menu.style.left = '0px';
+    menu.style.top = '0px';
     menu.hidden = false;
     const r = menu.getBoundingClientRect();
-    menu.style.left = Math.min(cx, window.innerWidth - r.width - 6) + 'px';
-    menu.style.top = Math.min(cy, window.innerHeight - r.height - 6) + 'px';
+    menu.style.left = Math.max(6, Math.min(cx, window.innerWidth - r.width - 6)) + 'px';
+    menu.style.top = Math.max(6, Math.min(cy, window.innerHeight - r.height - 6)) + 'px';
     const first = menu.querySelector('button');
     if (first) first.focus();
   }
