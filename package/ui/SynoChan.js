@@ -28,7 +28,7 @@ Ext.apply(SYNO.SDS.SynoChan.Utils, function () {
                 src += "&SynoToken=" + encodeURIComponent(token);
             }
             return '<iframe src="' + src + '" title="SynoChan" ' +
-                'style="display: block; width: 100%; height: 100%; border: none; margin: 0;"></iframe>';
+                'style="width: 100%; height: 100%; border: none; margin: 0"></iframe>';
         }
     };
 }());
@@ -47,16 +47,16 @@ Ext.define("SYNO.SDS.SynoChan.MainWindow", {
     constructor: function (config) {
         var ns = SYNO.SDS.SynoChan;
         this.appInstance = config.appInstance;
+        // Matches the window configuration of packages known to work on DSM 7.2+ ("syno-app-win" is the class
+        // DSM's own app windows use). Custom classes and min sizes were dropped while tracking down resize errors.
         ns.MainWindow.superclass.constructor.call(this, Ext.apply({
             layout: "fit",
             resizable: true,
+            cls: "syno-app-win",
             maximizable: true,
             minimizable: true,
             width: 1040,
             height: 660,
-            minWidth: 640,
-            minHeight: 400,
-            cls: "synochan-window",
             html: ns.Utils.getMainHtml()
         }, config));
         ns.Utils.ApplicationWindow = this;
