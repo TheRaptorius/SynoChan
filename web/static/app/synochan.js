@@ -239,6 +239,8 @@
       folderBtn.innerHTML = ICONS.folder;
       const moreBtn = el('button', { type: 'button', title: 'More actions', 'aria-haspopup': 'menu', onclick: (e) => {
         e.stopPropagation();
+        // A second click on the same button closes the menu again.
+        if (!$('#context-menu').hidden && openMenuKey === x.key) { hideMenus(); return; }
         // Measured before re-rendering, which replaces this button.
         const r = e.currentTarget.getBoundingClientRect();
         if (!sel.has(x.key)) { sel.clear(); sel.add(x.key); render(); }
@@ -584,8 +586,11 @@
 
   // ---------- Context menu ----------
 
+  let openMenuKey = null;
+
   function showContextMenu(x, cx, cy) {
     const menu = $('#context-menu');
+    openMenuKey = x.key;
     const many = state.selected[state.tab].size > 1;
     const btn = (label, fn, extra = {}) => el('button', { role: 'menuitem', type: 'button', ...extra, onclick: () => { hideMenus(); fn(); } }, label);
     const entries = [];
@@ -622,6 +627,7 @@
   }
 
   function hideMenus() {
+    openMenuKey = null;
     $('#context-menu').hidden = true;
     $('#main-menu').hidden = true;
     $('#menu-button').setAttribute('aria-expanded', 'false');

@@ -33,15 +33,54 @@ Ext.apply(SYNO.SDS.SynoChan.Utils, function () {
         // The iframe is a component, so the window's fit layout sets its pixel size on every resize and
         // maximize. Plain html content would keep the size it had when the window opened.
         createFrame: function () {
+            SYNO.SDS.SynoChan.Utils.installDragGuard();
             return new Ext.BoxComponent({
                 autoEl: {
                     tag: "iframe",
                     src: SYNO.SDS.SynoChan.Utils.getMainURL(),
                     title: "SynoChan",
                     frameborder: "0",
+                    "data-synochan-frame": "1",
                     style: "display: block; border: 0; margin: 0;"
                 }
             });
+        },
+
+        // An iframe swallows mouse events. When a DSM window is dragged or resized across it, DSM never sees the
+        // mouse move or the button release, and the drag gets stuck. So while any mouse button is held down in
+        // DSM itself, the iframe ignores the mouse. Clicks inside the iframe never reach this document and
+        // are unaffected.
+        installDragGuard: function () {
+            var utils = SYNO.SDS.SynoChan.Utils;
+            if (utils.dragGuardInstalled) {
+                return;
+            }
+            utils.dragGuardInstalled = true;
+            var disabled = false;
+            var setEnabled = function (enabled) {
+                if (disabled === !enabled) {
+                    return;
+                }
+                disabled = !enabled;
+                var frames = document.querySelectorAll("iframe[data-synochan-frame]");
+                for (var i = 0; i < frames.length; i++) {
+                    frames[i].style.pointerEvents = enabled ? "" : "none";
+                }
+            };
+            var disable = function () { setEnabled(false); };
+            var enable = function () { setEnabled(true); };
+            document.addEventListener("mousedown", disable, true);
+            document.addEventListener("touchstart", disable, true);
+            document.addEventListener("mouseup", enable, true);
+            document.addEventListener("touchend", enable, true);
+            document.addEventListener("touchcancel", enable, true);
+            window.addEventListener("blur", enable);
+            // A button released outside the browser sends no mouseup; the next move without buttons restores it.
+            document.addEventListener("mousemove", function (e) {
+                if (disabled && e.buttons === 0) {
+                    enable();
+                }
+            }, true);
         }
     };
 }());
