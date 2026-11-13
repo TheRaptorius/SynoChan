@@ -1,17 +1,26 @@
 {
-  ".url": {
-    "SYNO.SDS._ThirdParty.App.synochan": {
-      "type": "legacy",
-      "allUsers": false,
-      "title": "SynoChan",
-      "desc": "Archive 4chan threads and boards",
-      "icon": "images/icon_{0}.png",
-      "url": "/webman/3rdparty/synochan/app/index.html",
-      "width": 1040,
-      "height": 660,
-      "allowMultiInstance": false,
-      "grantPrivilege": "local",
-      "advanceGrantPrivilege": true
+    "SynoChan.js": {
+        "SYNO.SDS.SynoChan.Application": {
+            "type": "app",
+            "title": "SynoChan",
+            "desc": "Archive 4chan threads and boards",
+            "appWindow": "SYNO.SDS.SynoChan.MainWindow",
+            "icon": "images/icon_{0}.png",
+            "allowMultiInstance": false,
+            "allowStandalone": true,
+            "allUsers": false,
+            "grantPrivilege": "all",
+            "advanceGrantPrivilege": true,
+            "texts": "texts",
+            "depend": ["SYNO.SDS.SynoChan.MainWindow"]
+        },
+        "SYNO.SDS.SynoChan.MainWindow": {
+            "type": "lib",
+            "title": "SynoChan",
+            "icon": "images/icon_{0}.png",
+            "texts": "texts",
+            "depend": ["SYNO.SDS.SynoChan.Utils"]
+        },
+        "SYNO.SDS.SynoChan.Utils": []
     }
-  }
 }

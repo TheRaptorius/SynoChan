@@ -27,6 +27,9 @@
   // ---------- API ----------
 
   function synoToken() {
+    // Passed in the page URL by the DSM window; read from DSM itself as a fallback.
+    const fromURL = new URLSearchParams(window.location.search).get('SynoToken');
+    if (fromURL) return fromURL;
     try {
       const s = window.top.SYNO && window.top.SYNO.SDS && window.top.SYNO.SDS.Session;
       return (s && s.SynoToken) || '';
@@ -359,9 +362,7 @@
       if (data.unchanged) renderChrome();
       else render();
     } catch (e) {
-      state.connectionError = e.status === 401
-        ? 'Your DSM session has expired. Sign in to DSM again and reopen SynoChan.'
-        : e.message;
+      state.connectionError = e.message;
       render();
     }
     pollTimer = setTimeout(poll, document.hidden ? 10000 : 2000);
@@ -810,6 +811,16 @@
       facts.replaceChildren(el('dd', {}, e.message));
     }
   }
+
+  // ---------- DSM window ----------
+
+  // A click inside the iframe does not reach DSM, so bring the DSM window to the front ourselves.
+  document.addEventListener('mousedown', () => {
+    try {
+      const win = window.parent.SYNO.SDS.SynoChan.Utils.ApplicationWindow;
+      if (win && typeof win.toFront === 'function') win.toFront();
+    } catch (e) { /* Not inside a DSM window. */ }
+  }, true);
 
   // ---------- Start ----------
 

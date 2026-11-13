@@ -154,15 +154,14 @@ var apiPath = regexp.MustCompile(`^[a-z]+(/[a-z]+)?$`)
 func (f *Frontend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	user, err := f.Auth(r)
 	if err != nil {
-		status := http.StatusUnauthorized
-		if errors.Is(err, ErrForbidden) {
-			status = http.StatusForbidden
+		switch {
+		case errors.Is(err, ErrForbidden):
+			writeJSONError(w, http.StatusForbidden, ErrForbidden.Error())
+		case r.Header.Get("X-Syno-Token") == "" && r.URL.Query().Get("SynoToken") == "":
+			writeJSONError(w, http.StatusUnauthorized, "No DSM session was passed. Open SynoChan from the DSM main menu.")
+		default:
+			writeJSONError(w, http.StatusUnauthorized, "Your DSM session has expired. Sign in to DSM again and reopen SynoChan.")
 		}
-		msg := ErrUnauthenticated.Error()
-		if status == http.StatusForbidden {
-			msg = ErrForbidden.Error()
-		}
-		writeJSONError(w, status, msg)
 		return
 	}
 

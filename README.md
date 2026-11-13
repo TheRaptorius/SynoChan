@@ -16,7 +16,7 @@ It is a single static Go binary with no dependencies, so it runs on x86_64, ARMv
 
 ## Install
 
-Requires DSM 7.0 or later.
+Requires DSM 7.2 or later.
 
 **From the package source (recommended, gets updates):**
 
