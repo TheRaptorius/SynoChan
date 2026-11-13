@@ -2,6 +2,7 @@
     "SynoChan.js": {
         "SYNO.SDS.SynoChan.Application": {
             "type": "app",
+            "version": "@VERSION@",
             "title": "SynoChan",
             "desc": "Archive 4chan threads and boards",
             "appWindow": "SYNO.SDS.SynoChan.MainWindow",
@@ -16,6 +17,7 @@
         },
         "SYNO.SDS.SynoChan.MainWindow": {
             "type": "lib",
+            "version": "@VERSION@",
             "title": "SynoChan",
             "icon": "images/icon_{0}.png",
             "texts": "texts",

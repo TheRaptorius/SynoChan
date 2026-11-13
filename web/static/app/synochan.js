@@ -824,6 +824,46 @@
 
   // ---------- DSM window ----------
 
+  // An iframe swallows mouse events. When a DSM window is dragged or resized across it, DSM never sees the mouse
+  // move or the button release and the drag gets stuck, which blocks moving and resizing every window. So while
+  // a mouse button is held down anywhere in DSM itself, this frame ignores the mouse. Clicks inside the frame
+  // never reach DSM's document and are unaffected. Installed from here rather than from the DSM side, because
+  // this file is always loaded fresh.
+  (function installDragGuard() {
+    let frame, parentDoc, parentWin;
+    try {
+      frame = window.frameElement;
+      parentWin = window.parent;
+      parentDoc = parentWin.document;
+    } catch (e) {
+      return;
+    }
+    if (!frame || !parentDoc || parentWin === window) return;
+
+    let disabled = false;
+    const setEnabled = (enabled) => {
+      if (disabled === !enabled) return;
+      disabled = !enabled;
+      frame.style.pointerEvents = enabled ? '' : 'none';
+    };
+    const disable = () => setEnabled(false);
+    const enable = () => setEnabled(true);
+    // A button released outside the browser sends no mouseup; the next move without buttons restores the frame.
+    const onMove = (e) => { if (disabled && e.buttons === 0) enable(); };
+
+    const docEvents = [['mousedown', disable], ['touchstart', disable], ['mouseup', enable],
+      ['touchend', enable], ['touchcancel', enable], ['mousemove', onMove]];
+    docEvents.forEach(([type, fn]) => parentDoc.addEventListener(type, fn, true));
+    parentWin.addEventListener('blur', enable);
+
+    // Remove the listeners when this page goes away (window closed or reloaded), so none pile up in DSM.
+    window.addEventListener('pagehide', () => {
+      docEvents.forEach(([type, fn]) => parentDoc.removeEventListener(type, fn, true));
+      parentWin.removeEventListener('blur', enable);
+      frame.style.pointerEvents = '';
+    });
+  })();
+
   // A click inside the iframe does not reach DSM, so bring the DSM window to the front ourselves.
   document.addEventListener('mousedown', () => {
     try {

@@ -45,7 +45,9 @@ build 386 386 GO386=softfloat
 # 2. UI served by DSM from /webman/3rdparty/synochan/.
 mkdir -p "$TARGET/ui"
 cp -R web/static/. "$TARGET/ui/"
-cp package/ui/config package/ui/SynoChan.js "$TARGET/ui/"
+cp package/ui/SynoChan.js "$TARGET/ui/"
+# The version in ui/config lets DSM tell browsers that SynoChan.js changed.
+sed "s|@VERSION@|$SPK_VERSION|g" package/ui/config > "$TARGET/ui/config"
 cp -R package/ui/texts "$TARGET/ui/texts"
 install -m 0755 package/ui/api.cgi "$TARGET/ui/app/api.cgi"
 cp LICENSE NOTICE "$TARGET/"
