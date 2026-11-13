@@ -1,0 +1,41 @@
+#!/bin/sh
+# Shared settings for the package scripts.
+PKG="synochan"
+PKG_DEST="${SYNOPKG_PKGDEST:-/var/packages/$PKG/target}"
+PKG_VAR="${SYNOPKG_PKGVAR:-/var/packages/$PKG/var}"
+BIN="$PKG_DEST/bin/synochan"
+PID_FILE="$PKG_VAR/synochan.pid"
+SHARE_NAME="synochan"
+# DSM links shared folders granted through conf/resource here.
+DEFAULT_SAVE_PATH="/var/packages/$PKG/shares/$SHARE_NAME"
+
+# Picks the binary for this CPU and links it as bin/synochan.
+select_binary() {
+    case "$(uname -m)" in
+        x86_64|amd64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        armv7*|armv8l) arch="armv7" ;;
+        i?86) arch="386" ;;
+        *)
+            echo "Unsupported CPU architecture: $(uname -m)"
+            return 1
+            ;;
+    esac
+    target="$PKG_DEST/bin/synochan-linux-$arch"
+    if [ ! -x "$target" ]; then
+        echo "Missing binary for $arch"
+        return 1
+    fi
+    ln -sf "synochan-linux-$arch" "$PKG_DEST/bin/synochan" || return 1
+    # Drop the binaries for other CPUs to save space.
+    for f in "$PKG_DEST"/bin/synochan-linux-*; do
+        [ "$f" = "$target" ] || rm -f "$f"
+    done
+    return 0
+}
+
+is_running() {
+    [ -f "$PID_FILE" ] || return 1
+    pid="$(cat "$PID_FILE" 2>/dev/null)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}

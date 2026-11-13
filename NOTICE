@@ -1,0 +1,20 @@
+SynoChan
+Copyright (C) 2026 TheRaptorius
+https://github.com/TheRaptorius/SynoChan
+
+SynoChan is a rewrite, in Go and for Synology DSM, of GChan
+(https://github.com/Issung/GChan, by Issung and contributors), which is itself
+a fork of YChan. The original program is licensed under the GNU General Public
+License version 3, and SynoChan is distributed under the same license.
+
+The rewrite was made in November 2026. Compared with the original, the Windows
+desktop interface was replaced by a web interface inside DSM, the scraping and
+download logic was reimplemented, and tracked lists are stored as JSON instead
+of SQLite.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the LICENSE file for details.

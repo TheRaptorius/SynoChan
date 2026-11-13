@@ -1,0 +1,147 @@
+package core
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"slices"
+	"time"
+
+	"synochan/internal/config"
+)
+
+const stateVersion = 1
+
+type stateFile struct {
+	Version int           `json:"version"`
+	SavedAt time.Time     `json:"saved_at"`
+	Threads []threadState `json:"threads"`
+	Boards  []boardState  `json:"boards"`
+}
+
+type threadState struct {
+	Site         string    `json:"site"`
+	Board        string    `json:"board"`
+	ID           int64     `json:"id"`
+	Subject      *string   `json:"subject,omitempty"`
+	FileCount    *int      `json:"file_count,omitempty"`
+	LastModified time.Time `json:"last_modified,omitzero"`
+	SaveTo       string    `json:"save_to"`
+	AddedAt      time.Time `json:"added_at"`
+	SavedAssets  []string  `json:"saved_assets"`
+}
+
+type boardState struct {
+	Site             string    `json:"site"`
+	Code             string    `json:"code"`
+	GreatestThreadID int64     `json:"greatest_thread_id"`
+	LastModified     time.Time `json:"last_modified,omitzero"`
+	SaveTo           string    `json:"save_to"`
+	AddedAt          time.Time `json:"added_at"`
+}
+
+func (t *Thread) state() threadState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s := threadState{
+		Site:         t.Site,
+		Board:        t.Board,
+		ID:           t.ID,
+		LastModified: t.lastModified,
+		SaveTo:       t.SaveTo,
+		AddedAt:      t.AddedAt,
+		SavedAssets:  make([]string, 0, len(t.saved)),
+	}
+	if t.subjectSet {
+		subject := t.subject
+		s.Subject = &subject
+	}
+	if t.fileCountKnown {
+		fc := t.fileCount
+		s.FileCount = &fc
+	}
+	for id := range t.saved {
+		s.SavedAssets = append(s.SavedAssets, id.String())
+	}
+	slices.Sort(s.SavedAssets)
+	return s
+}
+
+func (m *Manager) threadFromState(s threadState) *Thread {
+	t := m.newThread(s.Board, s.ID, s.SaveTo)
+	t.AddedAt = s.AddedAt
+	if s.Subject != nil {
+		t.subject, t.subjectSet = *s.Subject, true
+	}
+	if s.FileCount != nil {
+		t.fileCount, t.fileCountKnown = *s.FileCount, true
+	}
+	uploadsSaved := 0
+	for _, raw := range s.SavedAssets {
+		id, err := ParseAssetID(raw)
+		if err != nil {
+			continue
+		}
+		t.saved[id] = struct{}{}
+		t.seen[id] = struct{}{}
+		if id.Type == AssetUpload {
+			uploadsSaved++
+		}
+	}
+	// Only send If-Modified-Since when every file was saved. Otherwise the next scrape downloads the thread
+	// regardless, so files that were found but not saved before a restart are queued again.
+	if s.FileCount != nil && *s.FileCount == uploadsSaved {
+		t.lastModified = s.LastModified
+	}
+	return t
+}
+
+func (b *Board) state() boardState {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return boardState{
+		Site:             b.Site,
+		Code:             b.Code,
+		GreatestThreadID: b.greatestThreadID,
+		LastModified:     b.lastModified,
+		SaveTo:           b.SaveTo,
+		AddedAt:          b.AddedAt,
+	}
+}
+
+func (m *Manager) boardFromState(s boardState) *Board {
+	b := m.newBoard(s.Code, s.SaveTo)
+	b.AddedAt = s.AddedAt
+	b.greatestThreadID = s.GreatestThreadID
+	b.lastModified = s.LastModified
+	return b
+}
+
+func readState(path string) (stateFile, error) {
+	var st stateFile
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return st, nil
+	}
+	if err != nil {
+		return st, err
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return st, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if st.Version > stateVersion {
+		return st, fmt.Errorf("%s was written by a newer version (format %d)", path, st.Version)
+	}
+	return st, nil
+}
+
+func writeState(path string, st stateFile) error {
+	st.Version = stateVersion
+	st.SavedAt = time.Now()
+	data, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return config.WriteFileAtomic(path, data, 0o640)
+}

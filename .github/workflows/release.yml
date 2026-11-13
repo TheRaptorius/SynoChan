@@ -1,0 +1,89 @@
+name: Release
+
+# Push a tag like v1.2.0 to build the SPK, publish a GitHub release and update the package source.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      spk: ${{ steps.spk.outputs.file }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go vet ./... && go test -race ./...
+
+      - name: Build SPK
+        id: spk
+        env:
+          MAINTAINER: ${{ github.repository_owner }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          CHANGELOG: See ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then version="0.0.0"; fi
+          scripts/build-spk.sh "$version" "$GITHUB_RUN_NUMBER"
+          echo "file=$(ls dist/*.spk | head -n1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spk
+          path: dist/*.spk
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/*.spk --generate-notes $prerelease
+
+      - name: Build package source site
+        if: github.ref_type == 'tag'
+        run: |
+          mkdir -p site
+          go run ./tools/spkindex \
+            -download-base "${{ github.server_url }}/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}" \
+            -site "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}" \
+            $(case "$GITHUB_REF_NAME" in *-*) echo -beta ;; esac) \
+            dist/*.spk > site/index.json
+          cp web/static/images/icon_72.png web/static/images/icon_256.png site/
+          cat > site/index.html <<HTML
+          <!doctype html><meta charset="utf-8"><title>SynoChan package source</title>
+          <p>Add <code>https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/index.json</code>
+          as a package source in DSM Package Center (Settings &gt; Package Sources).</p>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref_type == 'tag'
+        with:
+          path: site
+
+  pages:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

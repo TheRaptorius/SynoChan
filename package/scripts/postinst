@@ -1,0 +1,5 @@
+#!/bin/sh
+. "$(dirname "$0")/common"
+select_binary || exit 1
+mkdir -p "$PKG_VAR"
+exit 0

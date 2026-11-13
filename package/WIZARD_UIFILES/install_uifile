@@ -1,0 +1,10 @@
+[
+  {
+    "step_title": "Where files are saved",
+    "items": [
+      {
+        "desc": "SynoChan saves downloads to the shared folder <b>synochan</b>. It is created if it does not exist, and the package gets read/write access to it.<br><br>You can choose another folder later in SynoChan's settings. The system user <b>synochan</b> then needs read/write access to that shared folder (Control Panel &gt; Shared Folder &gt; Edit &gt; Permissions, show system internal users)."
+      }
+    ]
+  }
+]

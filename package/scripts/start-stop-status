@@ -1,0 +1,55 @@
+#!/bin/sh
+. "$(dirname "$0")/common"
+
+start_daemon() {
+    if is_running; then
+        return 0
+    fi
+    mkdir -p "$PKG_VAR"
+    nohup "$BIN" daemon --data "$PKG_VAR" --default-save-path "$DEFAULT_SAVE_PATH" \
+        >> "$PKG_VAR/stdout.log" 2>&1 < /dev/null &
+    echo $! > "$PID_FILE"
+    # Fail the start when the service exits right away (e.g. unreadable data folder).
+    sleep 1
+    if ! is_running; then
+        echo "SynoChan failed to start. See $PKG_VAR/synochan.log"
+        rm -f "$PID_FILE"
+        return 1
+    fi
+    return 0
+}
+
+stop_daemon() {
+    if ! is_running; then
+        rm -f "$PID_FILE"
+        return 0
+    fi
+    pid="$(cat "$PID_FILE")"
+    kill -TERM "$pid" 2>/dev/null
+    # Give running downloads and the final save time to finish.
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ $i -lt 30 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null
+    fi
+    rm -f "$PID_FILE"
+    return 0
+}
+
+case "$1" in
+    start) start_daemon; exit $? ;;
+    stop) stop_daemon; exit $? ;;
+    restart) stop_daemon; start_daemon; exit $? ;;
+    status)
+        if is_running; then exit 0; fi
+        exit 3
+        ;;
+    log)
+        echo "$PKG_VAR/synochan.log"
+        exit 0
+        ;;
+    *) exit 1 ;;
+esac

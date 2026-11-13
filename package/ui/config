@@ -1,0 +1,17 @@
+{
+  ".url": {
+    "SYNO.SDS._ThirdParty.App.synochan": {
+      "type": "legacy",
+      "allUsers": false,
+      "title": "SynoChan",
+      "desc": "Archive 4chan threads and boards",
+      "icon": "images/icon_{0}.png",
+      "url": "/webman/3rdparty/synochan/index.html",
+      "width": 1040,
+      "height": 660,
+      "allowMultiInstance": false,
+      "grantPrivilege": "local",
+      "advanceGrantPrivilege": true
+    }
+  }
+}
