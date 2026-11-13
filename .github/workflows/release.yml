@@ -21,11 +21,13 @@ jobs:
     outputs:
       spk: ${{ steps.spk.outputs.file }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          # No module dependencies (no go.sum), so there is nothing to cache.
+          cache: false
 
       - name: Test
         run: go vet ./... && go test -race ./...
@@ -42,7 +44,7 @@ jobs:
           scripts/build-spk.sh "$version" "$GITHUB_RUN_NUMBER"
           echo "file=$(ls dist/*.spk | head -n1)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: spk
           path: dist/*.spk
@@ -72,7 +74,7 @@ jobs:
           as a package source in DSM Package Center (Settings &gt; Package Sources).</p>
           HTML
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         if: github.ref_type == 'tag'
         with:
           path: site
@@ -86,4 +88,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
