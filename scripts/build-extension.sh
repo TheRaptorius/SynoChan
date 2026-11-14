@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Packs the browser extension as a zip for Chrome/Edge ("Load unpacked" after unzipping, or the Web Store).
+# Packs the browser extension as a zip for Chromium based browsers (Chrome, Edge, Brave) ("Load unpacked" after unzipping, or the Web Store).
 #
 # Usage: scripts/build-extension.sh <version>
 #   VERSION  e.g. 1.0.0 (a leading "v" and any "-build" suffix are stripped; browsers want plain numbers)
@@ -34,7 +34,8 @@ PY
 cp "$ROOT/LICENSE" "$WORK/LICENSE"
 
 mkdir -p "$OUT_DIR"
-OUT="$(cd "$OUT_DIR" && pwd)/synochan-extension-$VERSION.zip"
+# Built for Chromium based browsers (Chrome, Edge, Brave, …).
+OUT="$(cd "$OUT_DIR" && pwd)/synochan-extension-chrome-$VERSION.zip"
 rm -f "$OUT"
 (cd "$WORK" && zip -qr -X "$OUT" .)
 echo "Wrote $OUT"

@@ -56,7 +56,7 @@ board links, **Add this page to SynoChan** on thread and board pages (or <kbd>Al
 Its toolbar button adds the current page or a list of links, and opens SynoChan in DSM. When the NAS cannot be
 reached, links are kept and sent once it can.
 
-1. Download `synochan-extension-<version>.zip` from [Releases](../../releases) and unzip it.
+1. Download `synochan-extension-chrome-<version>.zip` from [Releases](../../releases) and unzip it.
 2. Open `chrome://extensions`, turn on Developer mode, choose **Load unpacked** and pick the unzipped folder.
 3. In SynoChan, open **⋯ > Settings > Browser extension**, create a token and copy it together with the server address
    into the extension's settings.
@@ -87,7 +87,7 @@ Needs Go (see `go.mod`).
 ```sh
 make test
 make spk VERSION=1.0.0      # writes dist/synochan-1.0.0-0001-noarch.spk
-scripts/build-extension.sh 1.0.0   # writes dist/synochan-extension-1.0.0.zip
+scripts/build-extension.sh 1.0.0   # writes dist/synochan-extension-chrome-1.0.0.zip
 make run                    # local service with the UI on http://127.0.0.1:8580, no login
 ```
 
