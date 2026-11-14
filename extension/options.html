@@ -25,6 +25,11 @@
         <input id="token" type="password" placeholder="sc_…" spellcheck="false" required>
         <small>Create one in SynoChan. It can only add links and can be revoked there at any time.</small>
       </label>
+      <label>
+        <span>When the NAS cannot be reached</span>
+        <select id="retry"></select>
+        <small>Links that could not be sent are tried again automatically at this interval.</small>
+      </label>
       <div class="actions">
         <button type="submit" class="primary" id="save">Save and test</button>
       </div>
@@ -35,7 +40,8 @@
       <h2>Using it</h2>
       <ul>
         <li>Right click a thread or board link on 4chan and choose <b>Add link to SynoChan</b>.</li>
-        <li>On a thread or board page, right click the page and choose <b>Add this page to SynoChan</b>, or press <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>.</li>
+        <li>On a thread or board page, right click the page and choose <b>Add this page to SynoChan</b>, or press <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>.
+          If the shortcut does nothing, another extension may use it: set one at <a href="#" id="shortcuts">chrome://extensions/shortcuts</a>.</li>
         <li>The toolbar button adds the current page or a list of links, and opens SynoChan in DSM.</li>
         <li>When the NAS cannot be reached (e.g. without VPN), links are kept and sent once it can.</li>
       </ul>

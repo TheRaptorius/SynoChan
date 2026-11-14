@@ -55,6 +55,7 @@ func New(m *core.Manager, tok *tokens.Store, info Info) http.Handler {
 	mux.HandleFunc("POST /api/boards/remove", h.removeBoards)
 	mux.HandleFunc("POST /api/boards/clear", h.clearBoards)
 	mux.HandleFunc("POST /api/boards/filters", h.setBoardFilters)
+	mux.HandleFunc("POST /api/boards/confirm", h.confirmBoard)
 	mux.HandleFunc("GET /api/boards/filtered", h.boardFiltered)
 	mux.HandleFunc("GET /api/filters/matches", h.filterMatches)
 	mux.HandleFunc("POST /api/pause", h.pause)
@@ -133,7 +134,8 @@ func (h *handler) add(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": h.m.AddURLs(req.Text)})
+	// In the app the user can decide about remembered board filters before the board's first check.
+	writeJSON(w, http.StatusOK, map[string]any{"results": h.m.AddURLsWith(req.Text, core.AddOptions{AskAboutRememberedFilters: true})})
 }
 
 type keysRequest struct {
@@ -389,4 +391,24 @@ func (h *handler) boardFiltered(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) filterMatches(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"threads": h.m.FilterMatches(r.URL.Query().Get("board"))})
+}
+
+func (h *handler) confirmBoard(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Key        string `json:"key"`
+		UseFilters bool   `json:"use_filters"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.m.ConfirmBoard(req.Key, req.UseFilters); err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, core.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{})
 }

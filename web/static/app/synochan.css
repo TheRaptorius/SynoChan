@@ -346,3 +346,11 @@ html.synochan .filtered-row .subject { font-weight: 600; overflow: hidden; text-
 html.synochan .filtered-row .reason { grid-column: 1; color: var(--ink-soft); font-size: 12px; }
 html.synochan .filtered-row .row-actions { grid-row: 1 / span 2; grid-column: 2; display: flex; gap: 6px; }
 html.synochan .filtered-row .row-actions a { color: var(--clover-deep); align-self: center; }
+
+html.synochan .tag-tools { display: flex; gap: 4px; justify-content: flex-end; margin-top: 2px; }
+html.synochan .tag-tools button { padding: 0 8px; font-size: 12px; }
+html.synochan .chips-static { display: flex; flex-wrap: wrap; gap: 4px; }
+html.synochan .tag-tools[hidden], html.synochan .field[hidden] { display: none; }
+
+/* The hidden attribute always wins over display set by a class (.check, .field, .tag-tools, …). */
+html.synochan [hidden] { display: none !important; }

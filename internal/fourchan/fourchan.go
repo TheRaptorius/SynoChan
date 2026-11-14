@@ -208,13 +208,22 @@ func Uploads(e Endpoints, board string, posts []Post) []UploadInfo {
 	return out
 }
 
+// IsVideo reports whether an upload extension is a video. The saved page shows videos with their thumbnail.
+func IsVideo(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".webm", ".mp4":
+		return true
+	}
+	return false
+}
+
 // Thumbnails lists thumbnails that are needed for a locally saved page.
 // Only video uploads need one; for images the page links to the full size file instead.
 func Thumbnails(e Endpoints, board string, posts []Post) []ThumbInfo {
 	var out []ThumbInfo
 	for i := range posts {
 		p := &posts[i]
-		if !p.HasFile() || *p.Ext != ".webm" {
+		if !p.HasFile() || !IsVideo(*p.Ext) {
 			continue
 		}
 		out = append(out, ThumbInfo{No: p.No, URL: fmt.Sprintf("%s/%s/%ss.jpg", e.Thumbs, board, p.TimString())})

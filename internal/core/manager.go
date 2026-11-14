@@ -55,6 +55,9 @@ type Manager struct {
 	boards      []*Board
 	boardByKey  map[string]*Board
 
+	// filterMemory holds the last own filters of every board key, kept after removal. Guarded by mu.
+	filterMemory map[string]config.BoardFilters
+
 	rev    atomic.Uint64
 	dirty  atomic.Bool
 	saveMu sync.Mutex
@@ -68,16 +71,17 @@ func New(opts Options) *Manager {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
-		ctx:         ctx,
-		cancel:      cancel,
-		cfg:         opts.Config,
-		client:      opts.Client,
-		endpoints:   opts.Endpoints,
-		statePath:   opts.StatePath,
-		log:         opts.Logger,
-		logLevel:    opts.LogLevel,
-		threadByKey: make(map[string]*Thread),
-		boardByKey:  make(map[string]*Board),
+		ctx:          ctx,
+		cancel:       cancel,
+		cfg:          opts.Config,
+		client:       opts.Client,
+		endpoints:    opts.Endpoints,
+		statePath:    opts.StatePath,
+		log:          opts.Logger,
+		logLevel:     opts.LogLevel,
+		threadByKey:  make(map[string]*Thread),
+		filterMemory: make(map[string]config.BoardFilters),
+		boardByKey:   make(map[string]*Board),
 	}
 	m.q = queue.New(queue.Options{
 		Limits: func() queue.Limits {
@@ -105,11 +109,19 @@ func (m *Manager) Start() error {
 			m.log.Error("could not load saved lists", "err", err)
 		}
 		m.mu.Lock()
+		for k, f := range st.FilterMemory {
+			if len(f.Skip) > 0 || len(f.Only) > 0 {
+				m.filterMemory[k] = f
+			}
+		}
 		for _, bs := range st.Boards {
 			if _, dup := m.boardByKey[boardKey(bs.Site, bs.Code)]; dup || bs.Code == "" {
 				continue
 			}
 			b := m.boardFromState(bs)
+			if len(b.filters.Skip) > 0 || len(b.filters.Only) > 0 {
+				m.filterMemory[b.Key()] = b.filters
+			}
 			m.boards = append(m.boards, b)
 			m.boardByKey[b.Key()] = b
 			m.q.Enqueue(b)
@@ -197,14 +209,18 @@ func (m *Manager) SaveNow() error {
 	m.dirty.Store(false)
 	m.mu.Lock()
 	st := stateFile{
-		Threads: make([]threadState, 0, len(m.threads)),
-		Boards:  make([]boardState, 0, len(m.boards)),
+		FilterMemory: make(map[string]config.BoardFilters, len(m.filterMemory)),
+		Threads:      make([]threadState, 0, len(m.threads)),
+		Boards:       make([]boardState, 0, len(m.boards)),
 	}
 	for _, b := range m.boards {
 		st.Boards = append(st.Boards, b.state())
 	}
 	for _, t := range m.threads {
 		st.Threads = append(st.Threads, t.state())
+	}
+	for k, f := range m.filterMemory {
+		st.FilterMemory[k] = f
 	}
 	m.mu.Unlock()
 	return writeState(m.statePath, st)
@@ -225,10 +241,30 @@ type AddResult struct {
 	SaveTo       string `json:"save_to,omitempty"`
 	SharePath    string `json:"share_path,omitempty"`
 	FolderExists bool   `json:"folder_exists,omitempty"`
+	// RememberedFilters are filters the board had before it was removed; they are applied. Pending means the
+	// board waits for the user to keep or drop them (see ConfirmBoard).
+	RememberedFilters *config.BoardFilters `json:"remembered_filters,omitempty"`
+	Pending           bool                 `json:"pending,omitempty"`
 }
 
+// AddOptions change how AddURLs treats boards with remembered filters.
+type AddOptions struct {
+	// AskAboutRememberedFilters holds such boards until ConfirmBoard is called (or the decision times out),
+	// so the user can choose before the first check. Without it the remembered filters are simply applied.
+	AskAboutRememberedFilters bool
+}
+
+// PendingDecisionTimeout starts a board with its remembered filters when nobody decides in time.
+var PendingDecisionTimeout = 2 * time.Minute
+
 // AddURLs adds every thread and board URL found in text. Entries may be separated by commas, spaces or new lines.
+// Boards added back get their remembered filters.
 func (m *Manager) AddURLs(text string) []AddResult {
+	return m.AddURLsWith(text, AddOptions{})
+}
+
+// AddURLsWith is AddURLs with options.
+func (m *Manager) AddURLsWith(text string, opts AddOptions) []AddResult {
 	s := m.cfg.Get()
 	var results []AddResult
 	var toQueue []queue.Item
@@ -263,8 +299,25 @@ func (m *Manager) AddURLs(text string) []AddResult {
 			b := m.newBoard(code, boardSaveDir(s.SavePath, code))
 			m.boards = append(m.boards, b)
 			m.boardByKey[key] = b
-			toQueue = append(toQueue, b)
-			results = append(results, AddResult{Input: input, Status: "added", Kind: "board", Key: key})
+			res := AddResult{Input: input, Status: "added", Kind: "board", Key: key}
+			if remembered, ok := m.filterMemory[key]; ok {
+				b.filters = remembered
+				f := remembered
+				res.RememberedFilters = &f
+				if opts.AskAboutRememberedFilters {
+					b.pending = true
+					res.Pending = true
+					b.pendingTimer = time.AfterFunc(PendingDecisionTimeout, func() {
+						if err := m.ConfirmBoard(key, true); err == nil {
+							m.log.Info("no decision about remembered filters, started with them", "board", key)
+						}
+					})
+				}
+			}
+			if !b.pending {
+				toQueue = append(toQueue, b)
+			}
+			results = append(results, res)
 			continue
 		}
 		results = append(results, AddResult{Input: input, Status: "invalid"})
@@ -432,6 +485,11 @@ func (m *Manager) RemoveBoard(key string) error {
 		return ErrNotFound
 	}
 	b.cancel()
+	b.mu.Lock()
+	if b.pendingTimer != nil {
+		b.pendingTimer.Stop()
+	}
+	b.mu.Unlock()
 	delete(m.boardByKey, key)
 	for i, x := range m.boards {
 		if x == b {
@@ -722,6 +780,52 @@ func (m *Manager) SetBoardFilters(key string, f config.BoardFilters) error {
 	b.mu.Lock()
 	b.filters = f
 	b.mu.Unlock()
+	m.rememberFilters(key, f)
+	m.touch()
+	m.saveLogged()
+	return nil
+}
+
+// rememberFilters records a board's own filters, or forgets them when there are none.
+func (m *Manager) rememberFilters(key string, f config.BoardFilters) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(f.Skip) == 0 && len(f.Only) == 0 {
+		delete(m.filterMemory, key)
+	} else {
+		m.filterMemory[key] = f
+	}
+}
+
+// ErrNotPending is returned when a board does not wait for a decision.
+var ErrNotPending = errors.New("the board does not wait for a decision")
+
+// ConfirmBoard starts a board that waits for a decision about its remembered filters: with useFilters they
+// stay, otherwise they are dropped and forgotten.
+func (m *Manager) ConfirmBoard(key string, useFilters bool) error {
+	m.mu.Lock()
+	b := m.boardByKey[key]
+	m.mu.Unlock()
+	if b == nil {
+		return ErrNotFound
+	}
+	b.mu.Lock()
+	if !b.pending {
+		b.mu.Unlock()
+		return ErrNotPending
+	}
+	b.pending = false
+	if b.pendingTimer != nil {
+		b.pendingTimer.Stop()
+		b.pendingTimer = nil
+	}
+	if !useFilters {
+		b.filters = config.BoardFilters{}
+	}
+	f := b.filters
+	b.mu.Unlock()
+	m.rememberFilters(key, f)
+	m.q.Enqueue(b)
 	m.touch()
 	m.saveLogged()
 	return nil

@@ -28,7 +28,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   setUpMenus();
   if (details.reason === 'install') chrome.runtime.openOptionsPage();
 });
-chrome.runtime.onStartup.addListener(setUpMenus);
+chrome.runtime.onStartup.addListener(() => {
+  setUpMenus();
+  // Links that waited while the browser was closed go out as soon as possible.
+  SynoChan.flush().catch(() => {});
+});
 
 function notify(message, isError) {
   chrome.notifications.create({

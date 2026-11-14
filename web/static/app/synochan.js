@@ -142,6 +142,7 @@
   }
 
   function nextCheck(item) {
+    if (item.pending) return 'waiting for your decision';
     if (state.snapshot.queue.paused) return 'paused';
     if (!item.next_check) return 'soon';
     return Date.parse(item.next_check) <= Date.now() ? 'waiting in queue' : relTime(item.next_check);
@@ -471,6 +472,9 @@
         toast(`Already tracking ${d.kind === 'thread' ? 'this thread' : 'this board'}.`, d.folder_exists ? {
           action: { label: 'Show folder', run: () => openFolder({ share_path: d.share_path, save_to: d.save_to }) },
         } : {});
+      }
+      for (const r of added.filter((x) => x.pending && x.remembered_filters)) {
+        await askAboutRememberedFilters(r);
       }
       if (invalid.length) {
         const shown = invalid.slice(0, 2).map((r) => `“${r.input.length > 60 ? r.input.slice(0, 57) + '…' : r.input}”`).join(', ');
@@ -859,13 +863,15 @@
       if (text.length > 100) return 'At most 100 characters';
       return null;
     };
+    // Only the chips are replaced; the text field stays where it is, so it keeps the focus.
     const render = () => {
-      const chips = values.map((v, i) => el('span', { class: 'chip', dataset: { i } }, el('span', {}, v),
+      root.querySelectorAll('.chip').forEach((c) => c.remove());
+      values.forEach((v, i) => root.insertBefore(el('span', { class: 'chip', dataset: { i } }, el('span', {}, v),
         el('button', { type: 'button', 'aria-label': `Remove ${v}`, title: 'Remove', onclick: (e) => {
           e.stopPropagation(); values.splice(i, 1); render(); entry.focus();
-        } }, '×')));
-      root.replaceChildren(...chips, entry, bubble);
+        } }, '×')), entry));
       entry.placeholder = values.length ? '' : (root.dataset.placeholder || '');
+      tools.hidden = values.length === 0;
     };
     const add = (raw) => {
       const text = raw.replace(/\s+/g, ' ').trim();
@@ -923,6 +929,20 @@
     entry.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== entry) bubble.hidden = true; }, 150));
     bubble.addEventListener('mousedown', (e) => { e.preventDefault(); if (!bubble.classList.contains('error')) commit(); });
     root.addEventListener('click', (e) => { if (e.target === root) entry.focus(); });
+
+    // Copy gives a comma separated list, which pasted into any of these fields adds every entry.
+    const tools = el('div', { class: 'tag-tools' },
+      el('button', { type: 'button', class: 'quiet', title: 'Copy all entries as a list you can paste into another filter', onclick: async () => {
+        const ok = await copyText(values.join(', '));
+        toast(ok ? `Copied ${values.length} entr${values.length === 1 ? 'y' : 'ies'}.` : 'Copying failed.', { error: !ok });
+      } }, 'Copy'),
+      el('button', { type: 'button', class: 'quiet danger', onclick: async () => {
+        const answer = await confirmDialog('Clear this list?', `All ${values.length} entries are removed from the list. Nothing is saved until you save.`, 'Clear list');
+        if (answer) { values = []; render(); }
+        entry.focus();
+      } }, 'Clear'));
+    root.after(tools);
+    root.append(entry, bubble);
 
     render();
     return {
@@ -1026,6 +1046,36 @@
     } catch (e) {
       toast(e.message, { error: true });
     }
+  }
+
+  // A board added back had filters before; it waits until the user keeps or drops them.
+  function askAboutRememberedFilters(r) {
+    const dialog = $('#remembered-dialog');
+    const f = r.remembered_filters;
+    const board = r.key.split('/').pop();
+    $('#remembered-title').textContent = `Filters for /${board}/ from before`;
+    $('#remembered-text').textContent = `When you tracked /${board}/ before, it had these filters. They are applied; checking the board starts once you decide.`;
+    const chips = (list) => (list || []).map((v) => el('span', { class: 'chip' }, el('span', {}, v)));
+    $('#remembered-skip').replaceChildren(...chips(f.skip));
+    $('#remembered-only').replaceChildren(...chips(f.only));
+    $('#remembered-skip-row').hidden = !(f.skip || []).length;
+    $('#remembered-only-row').hidden = !(f.only || []).length;
+    dialog.returnValue = '';
+    dialog.showModal();
+    return new Promise((resolve) => {
+      dialog.onclose = async () => {
+        // Closing without a choice keeps the filters, like the timeout does.
+        const useFilters = dialog.returnValue !== 'drop';
+        try {
+          await api('boards/confirm', { method: 'POST', body: { key: r.key, use_filters: useFilters } });
+          toast(useFilters ? `/${board}/ started with its earlier filters.` : `/${board}/ started without filters.`);
+        } catch (e) {
+          toast(e.message, { error: true });
+        }
+        refreshSoon();
+        resolve();
+      };
+    });
   }
 
   // ---------- Browser extension tokens ----------
@@ -1230,8 +1280,9 @@
   }
 
   // DSM measures a window's border from the first child of its frame wrapper and expects its own border element
-  // there. If an extension still inserts an element in front of it, maximize and resize fail for this window
-  // ("Cannot read properties of null (reading 'getFrameWidth')"). Keep DSM's element first.
+  // there. If an extension (Grammarly) inserts an element in front of it, maximize and resize fail for this window
+  // ("Cannot read properties of null (reading 'getFrameWidth')"). Such elements are moved behind DSM's.
+  // DSM's own element is never moved: it contains this frame, and moving a frame's ancestor reloads the frame.
   (function keepWindowFrameOrder() {
     let frame;
     try {
@@ -1242,13 +1293,21 @@
     const bwrap = frame && frame.closest ? frame.closest('.x-window-bwrap') : null;
     if (!bwrap || typeof MutationObserver !== 'function') return;
 
-    let fixes = 0;
+    const isDSM = (n) => n.nodeType !== 1 || n.contains(frame) || Array.from(n.classList).some((c) => c.startsWith('x-'));
+    let moved = 0;
     const fix = () => {
       const own = Array.from(bwrap.children).find((n) => n.classList.contains('x-window-ml'));
       if (!own || bwrap.firstChild === own) return;
-      // Stop if something keeps moving it back, rather than fight it in a loop.
-      if (++fixes > 50) return;
-      bwrap.insertBefore(own, bwrap.firstChild);
+      for (let n = bwrap.firstChild; n && n !== own; ) {
+        const next = n.nextSibling;
+        if (n.nodeType === 3 && !n.textContent.trim()) {
+          n.remove(); // Whitespace in front would be the first child too.
+        } else if (!isDSM(n)) {
+          if (++moved > 50) return; // Something keeps putting it back; stop rather than fight.
+          bwrap.appendChild(n);
+        }
+        n = next;
+      }
     };
     fix();
     const observer = new MutationObserver(fix);

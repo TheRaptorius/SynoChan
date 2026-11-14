@@ -20,6 +20,9 @@ type stateFile struct {
 	SavedAt time.Time     `json:"saved_at"`
 	Threads []threadState `json:"threads"`
 	Boards  []boardState  `json:"boards"`
+	// FilterMemory keeps the last own filters of every board by key, also after the board was removed,
+	// so they can be offered again when the board is added back.
+	FilterMemory map[string]config.BoardFilters `json:"filter_memory,omitempty"`
 }
 
 type threadState struct {

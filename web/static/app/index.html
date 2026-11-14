@@ -219,6 +219,20 @@
   </form>
 </dialog>
 
+<dialog id="remembered-dialog">
+  <form method="dialog">
+    <h2 id="remembered-title">Filters from before</h2>
+    <p id="remembered-text"></p>
+    <div class="field" id="remembered-skip-row"><span>Skip threads containing</span><div class="chips-static" id="remembered-skip"></div></div>
+    <div class="field" id="remembered-only-row"><span>Only threads containing</span><div class="chips-static" id="remembered-only"></div></div>
+    <p class="hint">You can change them later with Filters… in the board's menu. Without a decision, the board starts with these filters in two minutes.</p>
+    <div class="dialog-actions">
+      <button value="drop" class="quiet">Start without filters</button>
+      <button value="use" class="primary">Use these filters</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="filtered-dialog" class="wide">
   <form method="dialog">
     <h2 id="filtered-title">Filtered threads</h2>

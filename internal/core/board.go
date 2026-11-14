@@ -33,7 +33,9 @@ type Board struct {
 	lastCheck        time.Time
 	lastError        string
 	filters          config.BoardFilters // The board's own filters, on top of the global ones.
-	catalog          []catalogEntry      // Threads of the last catalog read, for listing filtered ones.
+	pending          bool                // Added back with remembered filters; waits for the user's decision.
+	pendingTimer     *time.Timer
+	catalog          []catalogEntry // Threads of the last catalog read, for listing filtered ones.
 }
 
 // catalogEntry is what filters need to know about a thread on a board.
@@ -222,6 +224,8 @@ type BoardView struct {
 	// Filters are the board's own filters; Filtered counts live threads the filters keep out.
 	Filters  config.BoardFilters `json:"filters"`
 	Filtered int                 `json:"filtered"`
+	// Pending boards wait for the user to decide about remembered filters before their first check.
+	Pending bool `json:"pending,omitempty"`
 }
 
 func (b *Board) view(interval time.Duration) BoardView {
@@ -239,6 +243,7 @@ func (b *Board) view(interval time.Duration) BoardView {
 		SharePath:   SharePath(b.SaveTo),
 		AddedAt:     b.AddedAt,
 		Filters:     b.filters,
+		Pending:     b.pending,
 	}
 	if info, err := os.Stat(b.SaveTo); err == nil && info.IsDir() {
 		v.FolderExists = true

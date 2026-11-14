@@ -12,6 +12,13 @@ async function refreshQueue() {
   const queue = await SynoChan.getQueue();
   $('#queue').hidden = queue.length === 0;
   $('#queue-text').textContent = queue.length === 1 ? '1 link waiting for the NAS' : `${queue.length} links waiting for the NAS`;
+  const next = await SynoChan.nextRetry();
+  let hint = '';
+  if (queue.length && next) {
+    const minutes = Math.max(0, Math.ceil((next - Date.now()) / 60000));
+    hint = minutes <= 0 ? 'Next automatic try in less than a minute.' : `Next automatic try in about ${minutes} min.`;
+  }
+  $('#queue-next').textContent = hint;
 }
 
 async function add(urls, button) {
@@ -42,6 +49,13 @@ async function init() {
   $('#add-current').disabled = !kind;
   $('#add-current').onclick = () => add([tab.url], $('#add-current'));
 
+  // The popup closes as soon as it loses focus, e.g. while copying the next link; keep what was typed.
+  const { draft = '' } = await chrome.storage.local.get('draft');
+  $('#bulk').value = draft;
+  // Saved on every change: the popup closes the moment it loses focus, so a delayed save could be lost.
+  // One small write to extension storage per change costs next to nothing.
+  $('#bulk').addEventListener('input', () => chrome.storage.local.set({ draft: $('#bulk').value }));
+
   $('#add-bulk').onclick = async () => {
     const lines = $('#bulk').value.split(/[\s,]+/).filter(Boolean);
     if (!lines.length) {
@@ -49,7 +63,10 @@ async function init() {
       return;
     }
     const result = await add(lines, $('#add-bulk'));
-    if (result && !result.invalid) $('#bulk').value = '';
+    if (result && !result.invalid) {
+      $('#bulk').value = '';
+      chrome.storage.local.remove('draft');
+    }
   };
 
   $('#retry').onclick = async () => {

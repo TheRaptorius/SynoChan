@@ -692,3 +692,62 @@ func TestBoardFilters(t *testing.T) {
 		t.Fatalf("origins not restored: %+v", matches)
 	}
 }
+
+func TestRememberedBoardFilters(t *testing.T) {
+	h := newHarness(t, nil)
+	h.board.setCatalog(map[string]any{"no": 1100, "sub": "Spoiler talk"}, map[string]any{"no": 1101, "sub": "Fine"})
+	h.board.setThread(1100, post(1100, 0, "", "", nil))
+	h.board.setThread(1101, post(1101, 0, "", "", nil))
+	h.m.AddURLs("https://boards.4chan.org/g/")
+	if err := h.m.SetBoardFilters("4chan/g", config.BoardFilters{Skip: []string{"spoiler"}}); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor("first scan", func() bool { return h.board.count("/g/catalog.json") >= 1 })
+	h.m.RemoveBoard("4chan/g")
+	h.m.ClearThreads(false)
+
+	// Added back in the app: filters applied, board held until the user decides.
+	scans := h.board.count("/g/catalog.json")
+	res := h.m.AddURLsWith("https://boards.4chan.org/g/", AddOptions{AskAboutRememberedFilters: true})
+	if !res[0].Pending || res[0].RememberedFilters == nil || res[0].RememberedFilters.Skip[0] != "spoiler" {
+		t.Fatalf("add result: %+v", res[0])
+	}
+	time.Sleep(200 * time.Millisecond)
+	if h.board.count("/g/catalog.json") != scans || !h.m.Snapshot().Boards[0].Pending {
+		t.Fatal("a pending board was checked before the decision")
+	}
+	// Dropping the filters forgets them and starts the board.
+	if err := h.m.ConfirmBoard("4chan/g", false); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor("both threads", func() bool { return h.thread("4chan/g/1100") != nil && h.thread("4chan/g/1101") != nil })
+	if err := h.m.ConfirmBoard("4chan/g", true); err != ErrNotPending {
+		t.Fatalf("second decision: %v", err)
+	}
+	h.m.RemoveBoard("4chan/g")
+	if res := h.m.AddURLs("https://boards.4chan.org/g/"); res[0].RememberedFilters != nil || res[0].Pending {
+		t.Fatalf("forgotten filters came back: %+v", res[0])
+	}
+
+	// From the extension (no question): remembered filters are applied right away.
+	h.m.SetBoardFilters("4chan/g", config.BoardFilters{Only: []string{"fine"}})
+	h.m.RemoveBoard("4chan/g")
+	res = h.m.AddURLs("https://boards.4chan.org/g/")
+	if res[0].Pending || res[0].RememberedFilters == nil || h.m.Snapshot().Boards[0].Filters.Only[0] != "fine" {
+		t.Fatalf("extension add: %+v", res[0])
+	}
+
+	// Nobody decides: the board starts with its filters after the timeout. The memory survives a restart.
+	h.m.RemoveBoard("4chan/g")
+	old := PendingDecisionTimeout
+	PendingDecisionTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { PendingDecisionTimeout = old })
+	h.m.AddURLsWith("https://boards.4chan.org/g/", AddOptions{AskAboutRememberedFilters: true})
+	h.waitFor("timeout start", func() bool { b := h.m.Snapshot().Boards; return len(b) == 1 && !b[0].Pending })
+	h.m.RemoveBoard("4chan/g")
+	h.m.Shutdown(5 * time.Second)
+	h.start()
+	if res := h.m.AddURLs("https://boards.4chan.org/g/"); res[0].RememberedFilters == nil || res[0].RememberedFilters.Only[0] != "fine" {
+		t.Fatalf("memory lost on restart: %+v", res[0])
+	}
+}

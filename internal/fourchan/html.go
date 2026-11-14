@@ -24,7 +24,7 @@ func FixThreadHTMLLinks(page, board string, uploads []LocalUpload, thumbsSaved b
 	for _, u := range uploads {
 		thumb := u.Tim + "s.jpg"
 		for _, host := range hosts {
-			if u.Ext == ".webm" {
+			if IsVideo(u.Ext) {
 				if thumbsSaved {
 					page = r(page, host+thumb, "thumb/"+thumb)
 				}
