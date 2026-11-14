@@ -751,3 +751,60 @@ func TestRememberedBoardFilters(t *testing.T) {
 		t.Fatalf("memory lost on restart: %+v", res[0])
 	}
 }
+
+func TestChangedFiltersLetThreadsIn(t *testing.T) {
+	h := newHarness(t, func(s *config.Settings) { s.Filters.Only = []string{"cats"} })
+	for i, sub := range []string{"cats daily", "dogs daily", "birds daily", "more cats"} {
+		id := int64(1200 + i)
+		h.board.setThread(id, post(id, 0, "", "", nil))
+		_ = sub
+	}
+	h.board.setCatalog(
+		map[string]any{"no": 1200, "sub": "cats daily"},
+		map[string]any{"no": 1201, "sub": "dogs daily"},
+		map[string]any{"no": 1202, "sub": "birds daily"},
+		map[string]any{"no": 1203, "sub": "more cats"},
+	)
+	h.m.AddURLs("https://boards.4chan.org/g/")
+	h.waitFor("first scan", func() bool { return h.thread("4chan/g/1200") != nil && h.thread("4chan/g/1203") != nil })
+	if h.thread("4chan/g/1201") != nil || h.thread("4chan/g/1202") != nil {
+		t.Fatal("filtered threads were added")
+	}
+	// The user removes a cats thread; then the only-list is widened to dogs and cats.
+	h.m.RemoveThread("4chan/g/1203", false)
+	s := h.m.Settings()
+	s.Filters.Only = []string{"cats", "dogs"}
+	if err := h.m.UpdateSettings(s); err != nil {
+		t.Fatal(err)
+	}
+	h.waitFor("dogs let in", func() bool { return h.thread("4chan/g/1201") != nil })
+	time.Sleep(100 * time.Millisecond)
+	if h.thread("4chan/g/1202") != nil {
+		t.Fatal("still filtered thread added")
+	}
+	if h.thread("4chan/g/1203") != nil {
+		t.Fatal("thread the user removed came back")
+	}
+	if v := h.thread("4chan/g/1201"); v == nil {
+		t.Fatal("missing")
+	}
+
+	// A board saved by an older version (no removal records): threads not tracked but allowed are taken as
+	// removed by the user, and do not come back.
+	h.m.RemoveThread("4chan/g/1201", false)
+	h.m.mu.Lock()
+	b := h.m.boardByKey["4chan/g"]
+	h.m.mu.Unlock()
+	b.mu.Lock()
+	b.dismissed = map[int64]bool{}
+	b.seedDismissed = true
+	b.rescan = true // The catalog did not change; read it anyway, as after an upgrade once it changes.
+	b.mu.Unlock()
+	h.recheck("4chan/g")
+	h.waitFor("seeded", func() bool { b.mu.Lock(); defer b.mu.Unlock(); return !b.seedDismissed })
+	h.recheck("4chan/g")
+	time.Sleep(300 * time.Millisecond)
+	if h.thread("4chan/g/1201") != nil {
+		t.Fatal("thread removed under the old version came back")
+	}
+}

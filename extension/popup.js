@@ -37,6 +37,37 @@ async function add(urls, button) {
   }
 }
 
+// Connection and versions, checked each time the popup opens.
+async function showStatus(configured) {
+  $('#ext-version').textContent = `Extension ${chrome.runtime.getManifest().version}`;
+  const dot = $('#conn-dot');
+  const text = $('#conn-text');
+  const set = (state, message, appVersion) => {
+    dot.className = `dot ${state}`;
+    text.textContent = message;
+    $('#app-version').textContent = appVersion ? `SynoChan ${appVersion}` : '';
+  };
+  if (!configured) {
+    set('off', 'Not set up');
+    return;
+  }
+  const { server } = await SynoChan.getConfig();
+  const host = new URL(server).host;
+  set('wait', `Checking ${host}…`);
+  try {
+    const info = await SynoChan.ping();
+    set('ok', `Connected to ${host}`, info.version);
+  } catch (e) {
+    const message = {
+      auth: `${host}: API token rejected`,
+      offline: `${host} not reachable`,
+      config: 'Not set up',
+    }[e.kind] || `${host}: ${e.message}`;
+    set(e.kind === 'offline' ? 'off' : 'bad', message);
+    $('#conn-text').title = e.message;
+  }
+}
+
 async function init() {
   const { server, token } = await SynoChan.getConfig();
   const configured = !!(server && token);
@@ -86,6 +117,7 @@ async function init() {
   $('#open-options').onclick = () => chrome.runtime.openOptionsPage();
   $('#setup-button').onclick = () => chrome.runtime.openOptionsPage();
   await refreshQueue();
+  showStatus(configured);
 }
 
 init();

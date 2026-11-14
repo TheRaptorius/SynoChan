@@ -34,8 +34,15 @@ type Board struct {
 	lastError        string
 	filters          config.BoardFilters // The board's own filters, on top of the global ones.
 	pending          bool                // Added back with remembered filters; waits for the user's decision.
-	pendingTimer     *time.Timer
-	catalog          []catalogEntry // Threads of the last catalog read, for listing filtered ones.
+	// dismissed are threads of this board the user removed; a board never adds them again. Only ids still in
+	// the catalog are kept, so the set stays small.
+	dismissed map[int64]bool
+	rescan    bool // Read the catalog in full at the next check, as the filters changed.
+	// seedDismissed: the board comes from a version that did not record removals. At its first check, threads
+	// it saw before that are allowed but not tracked must have been removed by the user; they are recorded so.
+	seedDismissed bool
+	pendingTimer  *time.Timer
+	catalog       []catalogEntry // Threads of the last catalog read, for listing filtered ones.
 }
 
 // catalogEntry is what filters need to know about a thread on a board.
@@ -58,13 +65,14 @@ type FilteredThread struct {
 func (m *Manager) newBoard(code, saveTo string) *Board {
 	ctx, cancel := context.WithCancel(m.ctx)
 	return &Board{
-		m:       m,
-		Site:    fourchan.SiteName,
-		Code:    code,
-		SaveTo:  saveTo,
-		AddedAt: time.Now(),
-		ctx:     ctx,
-		cancel:  cancel,
+		m:         m,
+		Site:      fourchan.SiteName,
+		Code:      code,
+		SaveTo:    saveTo,
+		AddedAt:   time.Now(),
+		ctx:       ctx,
+		cancel:    cancel,
+		dismissed: make(map[int64]bool),
 	}
 }
 
@@ -108,6 +116,10 @@ func (b *Board) Process(ctx context.Context) (queue.Result, error) {
 	b.mu.Lock()
 	b.lastAttempt = time.Now()
 	since := b.lastModified
+	if b.rescan {
+		since = time.Time{} // Filters changed: read the whole catalog even if the board did not change.
+		b.rescan = false
+	}
 	greatest := b.greatestThreadID
 	b.mu.Unlock()
 	b.m.touch()
@@ -147,6 +159,15 @@ func (b *Board) Process(ctx context.Context) (queue.Result, error) {
 	}
 
 	rules := b.m.boardRules(b)
+	tracked := b.m.trackedIDs()
+	b.mu.Lock()
+	seed := b.seedDismissed
+	dismissed := make(map[int64]bool, len(b.dismissed))
+	for id := range b.dismissed {
+		dismissed[id] = true
+	}
+	b.mu.Unlock()
+	live := map[int64]bool{}
 	total := 0
 	var catalog []catalogEntry
 	var newThreads []queue.Item
@@ -159,14 +180,26 @@ func (b *Board) Process(ctx context.Context) (queue.Result, error) {
 			filterSubject, text := fourchan.FilterText(p)
 			entry := catalogEntry{ID: p.No, Subject: fourchan.ExtractSubject(p), FilterS: filterSubject, Text: text, Sticky: p.Sticky != 0}
 			catalog = append(catalog, entry)
+			live[p.No] = true
+			verdict := rules.Check(entry.FilterS, entry.Text, entry.Sticky)
 			if p.No <= greatest {
-				continue
-			}
-			// Filtered threads count as seen too, so they are judged (and logged) once.
-			greatestNew = max(greatestNew, p.No)
-			if v := rules.Check(entry.FilterS, entry.Text, entry.Sticky); !v.Allowed {
-				b.m.log.Info("thread filtered", "board", b.Code, "thread", p.No, "reason", v.Reason, "subject", entry.Subject)
-				continue
+				// Seen before. Add it now only if it was filtered then and the filters let it in now: it is not
+				// tracked, and the user did not remove it.
+				if !verdict.Allowed || tracked[threadKey(b.Site, b.Code, p.No)] || dismissed[p.No] {
+					continue
+				}
+				if seed {
+					dismissed[p.No] = true
+					continue
+				}
+				b.m.log.Info("thread let in by changed filters", "board", b.Code, "thread", p.No, "subject", entry.Subject)
+			} else {
+				// Filtered threads count as seen too, so they are judged (and logged) once.
+				greatestNew = max(greatestNew, p.No)
+				if !verdict.Allowed {
+					b.m.log.Info("thread filtered", "board", b.Code, "thread", p.No, "reason", verdict.Reason, "subject", entry.Subject)
+					continue
+				}
 			}
 			t := b.m.newThread(b.Code, p.No, saveRoot)
 			t.FromBoard = b.Key()
@@ -182,6 +215,17 @@ func (b *Board) Process(ctx context.Context) (queue.Result, error) {
 
 	b.mu.Lock()
 	b.catalog = catalog
+	if seed {
+		b.seedDismissed = false
+		for id := range dismissed {
+			b.dismissed[id] = true
+		}
+	}
+	for id := range b.dismissed {
+		if !live[id] {
+			delete(b.dismissed, id) // Gone from the board: nothing left to keep out.
+		}
+	}
 	b.threadCount = total
 	if len(newThreads) == 0 {
 		b.greatestThreadID = max(b.greatestThreadID, greatestNew)

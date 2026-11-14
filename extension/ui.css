@@ -54,3 +54,13 @@ body.options { background: var(--sunk); font-size: 16px; }
 .options ul { padding-left: 18px; }
 .options li { margin: 4px 0; }
 kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; font-size: 11px; background: var(--sunk); }
+
+/* Popup footer: connection state and versions. */
+.popup .about { display: grid; gap: 2px; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--sunk); font-size: 12px; color: var(--ink-soft); }
+.popup .conn { display: flex; align-items: center; gap: 6px; color: var(--ink); }
+.popup .versions { display: flex; justify-content: space-between; }
+.popup .dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa09a; flex: none; }
+.popup .dot.ok { background: var(--clover); }
+.popup .dot.wait { background: #d0a32b; }
+.popup .dot.bad { background: var(--alert); }
+.popup .dot.off { background: #9aa09a; }

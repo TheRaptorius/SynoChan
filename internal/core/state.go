@@ -52,6 +52,8 @@ type boardState struct {
 	SaveTo           string               `json:"save_to"`
 	AddedAt          time.Time            `json:"added_at"`
 	Filters          *config.BoardFilters `json:"filters,omitempty"`
+	Dismissed        []int64              `json:"dismissed,omitempty"`
+	DismissedKnown   bool                 `json:"dismissed_known"`
 }
 
 func (t *Thread) state() threadState {
@@ -147,8 +149,15 @@ func (b *Board) state() boardState {
 		f := b.filters
 		filters = &f
 	}
+	var dismissed []int64
+	for id := range b.dismissed {
+		dismissed = append(dismissed, id)
+	}
+	slices.Sort(dismissed)
 	return boardState{
 		Filters:          filters,
+		Dismissed:        dismissed,
+		DismissedKnown:   true,
 		Site:             b.Site,
 		Code:             b.Code,
 		GreatestThreadID: b.greatestThreadID,
@@ -166,6 +175,10 @@ func (m *Manager) boardFromState(s boardState) *Board {
 	if s.Filters != nil {
 		b.filters = *s.Filters
 	}
+	for _, id := range s.Dismissed {
+		b.dismissed[id] = true
+	}
+	b.seedDismissed = !s.DismissedKnown
 	return b
 }
 

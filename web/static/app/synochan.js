@@ -237,29 +237,46 @@
     render();
   }
 
+  const rowCache = { threads: new Map(), boards: new Map() };
+
   function renderBody() {
     const tab = state.tab;
+    if (state.renderedTab !== tab) {
+      $('#tbody').replaceChildren();
+      state.renderedTab = tab;
+    }
     const list = items();
     const sel = state.selected[tab];
     const cols = visibleColumns(tab);
+    // Rows are kept per key and only their cells are replaced. A click whose row was replaced between pressing
+    // and releasing the button would be dropped by the browser (or land on another row).
+    const cache = rowCache[tab];
     const rows = list.map((x) => {
+      let tr = cache.get(x.key);
+      if (!tr) {
+        tr = el('tr', {
+          dataset: { key: x.key },
+          onclick: (e) => toggleSelect(x.key, { additive: e.ctrlKey || e.metaKey, range: e.shiftKey }),
+          ondblclick: () => { if (tr.item.folder_exists) openFolder(tr.item); },
+          oncontextmenu: (e) => {
+            e.preventDefault();
+            const s = state.selected[tab];
+            if (!s.has(x.key)) { s.clear(); s.add(x.key); render(); }
+            showContextMenu(tr.item, e.clientX, e.clientY);
+          },
+        });
+        cache.set(x.key, tr);
+      }
+      tr.item = x;
+      tr.className = [sel.has(x.key) ? 'selected' : '', x.last_error ? 'has-error' : '', x.priority ? 'pinned' : ''].join(' ').trim();
+
       const checkbox = el('input', { type: 'checkbox', 'aria-label': 'Select', onclick: (e) => {
         e.stopPropagation();
         toggleSelect(x.key, { additive: true, range: e.shiftKey });
       } });
       checkbox.checked = sel.has(x.key);
-      const tr = el('tr', {
-        class: [sel.has(x.key) ? 'selected' : '', x.last_error ? 'has-error' : '', x.priority ? 'pinned' : ''].join(' ').trim(),
-        dataset: { key: x.key },
-        onclick: (e) => toggleSelect(x.key, { additive: e.ctrlKey || e.metaKey, range: e.shiftKey }),
-        ondblclick: () => { if (x.folder_exists) openFolder(x); },
-        oncontextmenu: (e) => {
-          e.preventDefault();
-          if (!sel.has(x.key)) { sel.clear(); sel.add(x.key); render(); }
-          showContextMenu(x, e.clientX, e.clientY);
-        },
-      }, el('td', { class: 'sel' }, checkbox));
-      for (const c of cols) tr.append(c.cell(x));
+      const cells = [el('td', { class: 'sel' }, checkbox)];
+      for (const c of cols) cells.push(c.cell(x));
       const folderBtn = el('button', {
         type: 'button',
         title: x.folder_exists ? 'Show folder in File Station' : NO_FOLDER_YET,
@@ -277,10 +294,16 @@
         showContextMenu(x, r.right, r.bottom);
       } });
       moreBtn.innerHTML = ICONS.more;
-      tr.append(el('td', { class: 'actions' }, folderBtn, moreBtn));
+      cells.push(el('td', { class: 'actions' }, folderBtn, moreBtn));
+      tr.replaceChildren(...cells);
       return tr;
     });
-    $('#tbody').replaceChildren(...rows);
+    const keep = new Set(list.map((x) => x.key));
+    for (const key of cache.keys()) if (!keep.has(key)) cache.delete(key);
+    // Existing rows are moved, not recreated, so the order can change without losing a click.
+    const tbody = $('#tbody');
+    rows.forEach((tr, i) => { if (tbody.children[i] !== tr) tbody.insertBefore(tr, tbody.children[i] || null); });
+    while (tbody.children.length > rows.length) tbody.lastElementChild.remove();
 
     const empty = $('#empty');
     const total = (state.snapshot[tab] || []).length;
@@ -402,6 +425,7 @@
         }
       }
       if (data.unchanged) renderChrome();
+      else if (pointerDown) { renderChrome(); renderPending = true; }
       else render();
     } catch (e) {
       state.connectionError = e.message;
@@ -410,8 +434,20 @@
     pollTimer = setTimeout(poll, document.hidden ? 10000 : 2000);
   }
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+
+  // While a mouse button is held, the list is not re-rendered, so a click always lands on the row it started on.
+  let pointerDown = false;
+  let renderPending = false;
+  document.addEventListener('mousedown', () => { pointerDown = true; }, true);
+  const release = () => {
+    if (!pointerDown) return;
+    pointerDown = false;
+    if (renderPending) { renderPending = false; setTimeout(render, 0); }
+  };
+  document.addEventListener('mouseup', release, true);
+  window.addEventListener('blur', release);
   // Relative times tick even when nothing changes.
-  setInterval(() => { if (!document.hidden) renderBody(); }, 15000);
+  setInterval(() => { if (!document.hidden && !pointerDown) renderBody(); }, 15000);
 
   function refreshSoon() { state.rev = null; poll(); }
 

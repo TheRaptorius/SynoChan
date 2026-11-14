@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -394,11 +395,49 @@ func (m *Manager) RemoveThread(key string, deleteFiles bool) error {
 	if t == nil {
 		return ErrNotFound
 	}
+	m.dismiss(t)
 	m.removeThread(t)
 	if deleteFiles {
 		return m.deleteThreadDir(t)
 	}
 	return nil
+}
+
+// dismiss records that the user removed a thread, so its board does not add it again.
+func (m *Manager) dismiss(t *Thread) {
+	m.mu.Lock()
+	b := m.boardByKey[boardKey(t.Site, t.Board)]
+	m.mu.Unlock()
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.dismissed[t.ID] = true
+	b.mu.Unlock()
+}
+
+// recheckBoards checks boards again soon, reading their catalogs in full, so changed filters apply to threads
+// already on them: newly allowed threads are added (unless the user removed them).
+func (m *Manager) recheckBoards(key string) {
+	m.mu.Lock()
+	var boards []*Board
+	for _, b := range m.boards {
+		if key == "" || b.Key() == key {
+			boards = append(boards, b)
+		}
+	}
+	m.mu.Unlock()
+	for _, b := range boards {
+		b.mu.Lock()
+		b.rescan = true
+		b.lastAttempt = time.Time{}
+		pending := b.pending
+		b.mu.Unlock()
+		if !pending {
+			m.q.Enqueue(b)
+		}
+	}
+	m.q.Wake()
 }
 
 // deleteThreadDir deletes a removed thread's folder, once writes in flight have stopped. Only a folder
@@ -456,6 +495,12 @@ func (m *Manager) removeThread(t *Thread) {
 func (m *Manager) ClearThreads(deleteFiles bool) []error {
 	m.mu.Lock()
 	all := m.threads
+	m.mu.Unlock()
+	for _, t := range all {
+		m.dismiss(t)
+	}
+	m.mu.Lock()
+	all = m.threads
 	for _, t := range all {
 		t.cancel()
 	}
@@ -672,6 +717,9 @@ func (m *Manager) UpdateSettings(s config.Settings) error {
 	m.q.Purge() // Thumbnails stop being wanted when they are turned off.
 	m.q.Wake()  // Download limits may have changed.
 	m.touch()
+	if !reflect.DeepEqual(s.Filters, old.Filters) || s.SkipSticky != old.SkipSticky {
+		m.recheckBoards("")
+	}
 	if s.KeepLists && !old.KeepLists {
 		// Save everything now, so trackers added while saving was off are kept too.
 		m.saveLogged()
@@ -781,6 +829,7 @@ func (m *Manager) SetBoardFilters(key string, f config.BoardFilters) error {
 	b.filters = f
 	b.mu.Unlock()
 	m.rememberFilters(key, f)
+	m.recheckBoards(key)
 	m.touch()
 	m.saveLogged()
 	return nil
