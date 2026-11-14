@@ -5,6 +5,10 @@ on:
     branches: ["**"]
   pull_request:
 
+# Silences deprecation warnings that Node based actions print (e.g. "punycode"); they are not ours to fix.
+env:
+  NODE_OPTIONS: --no-deprecation
+
 jobs:
   test:
     runs-on: ubuntu-latest

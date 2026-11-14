@@ -15,6 +15,10 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Silences deprecation warnings that Node based actions print (e.g. "punycode"); they are not ours to fix.
+env:
+  NODE_OPTIONS: --no-deprecation
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -44,10 +48,18 @@ jobs:
           scripts/build-spk.sh "$version" "$GITHUB_RUN_NUMBER"
           echo "file=$(ls dist/*.spk | head -n1)" >> "$GITHUB_OUTPUT"
 
+      - name: Build browser extension
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then version="0.0.0"; fi
+          scripts/build-extension.sh "$version"
+
       - uses: actions/upload-artifact@v6
         with:
-          name: spk
-          path: dist/*.spk
+          name: packages
+          path: |
+            dist/*.spk
+            dist/*.zip
 
       - name: Publish release
         if: github.ref_type == 'tag'
@@ -56,7 +68,7 @@ jobs:
         run: |
           prerelease=""
           case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/*.spk --generate-notes $prerelease
+          gh release create "$GITHUB_REF_NAME" dist/*.spk dist/synochan-extension-*.zip --generate-notes $prerelease
 
       - name: Build package source site
         if: github.ref_type == 'tag'
