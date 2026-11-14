@@ -291,3 +291,58 @@ html.synochan td.subject .text { display: flex; align-items: baseline; min-width
 html.synochan td.subject .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 html.synochan .empty .link-button { margin-top: 12px; }
 html.synochan .hint { color: var(--ink-soft); font-size: 12px; }
+
+html.synochan .copy-row { display: flex; gap: 8px; align-items: center; }
+html.synochan .copy-row input { flex: 1; min-width: 0; }
+html.synochan .copy-row code {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 5px 8px; background: var(--sunk); border: 1px solid var(--line); border-radius: var(--radius-s);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px;
+}
+html.synochan .token-list { display: grid; gap: 4px; }
+html.synochan .token-row { display: flex; gap: 8px; align-items: baseline; padding: 4px 0; border-bottom: 1px solid var(--line); }
+html.synochan .token-row .name { font-weight: 600; }
+html.synochan .token-row .meta { color: var(--ink-soft); font-size: 12px; flex: 1; }
+html.synochan .token-new { padding: 10px; border-radius: var(--radius-s); background: var(--leaf-faint); border: 1px solid var(--leaf); display: grid; gap: 6px; }
+html.synochan .token-new code { user-select: all; }
+
+/* Tag input: entries as chips with a remove button, typing in the field at the end. */
+html.synochan .tags {
+  position: relative; display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+  min-height: 32px; padding: 3px 4px; cursor: text;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-s);
+}
+html.synochan .tags:focus-within { border-color: var(--clover); box-shadow: 0 0 0 1px var(--clover); }
+html.synochan .chip {
+  display: inline-flex; align-items: center; gap: 2px; max-width: 100%;
+  padding: 1px 2px 1px 8px; border-radius: 99px;
+  background: var(--leaf); color: var(--clover-deep); font-weight: 600; font-size: 12px;
+}
+html.synochan .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html.synochan .chip button {
+  border: 0; background: transparent; color: inherit; padding: 0 5px; line-height: 18px; border-radius: 99px; font-size: 14px;
+}
+html.synochan .chip button:hover { background: var(--clover); color: #fff; }
+html.synochan .chip.flash { animation: chip-flash 600ms ease-out; }
+@keyframes chip-flash { 0%, 50% { background: var(--clover); color: #fff; } }
+html.synochan .tags input.tag-entry { flex: 1; min-width: 160px; border: 0; padding: 3px 4px; background: transparent; outline: none; }
+html.synochan .tag-suggest {
+  position: absolute; z-index: 5; top: calc(100% + 4px);
+  padding: 4px 10px; border-radius: var(--radius-s); background: var(--ink); color: var(--surface);
+  font-size: 12px; white-space: nowrap; cursor: pointer; box-shadow: var(--shadow);
+}
+html.synochan .tag-suggest.error { background: var(--alert); color: #fff; cursor: default; }
+html.synochan .hint code, html.synochan .reason code { font-size: 11px; padding: 0 3px; background: var(--sunk); border-radius: 3px; }
+
+/* Board filter markers and the filtered list. */
+html.synochan .own-filters {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 99px;
+  background: var(--sunk); border: 1px solid var(--line); color: var(--ink-soft); font-size: 11px;
+}
+html.synochan button.count-link { border: 0; background: transparent; color: var(--clover-deep); padding: 0; text-decoration: underline; }
+html.synochan .filtered-list { display: grid; max-height: 55vh; overflow: auto; border-top: 1px solid var(--line); }
+html.synochan .filtered-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 6px 0; border-bottom: 1px solid var(--line); align-items: center; }
+html.synochan .filtered-row .subject { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html.synochan .filtered-row .reason { grid-column: 1; color: var(--ink-soft); font-size: 12px; }
+html.synochan .filtered-row .row-actions { grid-row: 1 / span 2; grid-column: 2; display: flex; gap: 6px; }
+html.synochan .filtered-row .row-actions a { color: var(--clover-deep); align-self: center; }

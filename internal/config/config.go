@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"synochan/internal/filter"
 )
 
 // ImageFilenameFormat decides how downloaded files are named.
@@ -38,6 +40,12 @@ const (
 	ThemeDark  Theme = "dark"
 )
 
+// BoardFilters decide which threads boards add. Entries are words or phrases; see package filter.
+type BoardFilters struct {
+	Skip []string `json:"skip"`
+	Only []string `json:"only"`
+}
+
 // MinSecondsBetweenScrapesFloor is the lowest allowed recheck interval; the image board's API rules ask
 // for at least 10 seconds between updates of a thread.
 const MinSecondsBetweenScrapesFloor = 10
@@ -59,6 +67,9 @@ type Settings struct {
 	SaveHTML               bool                `json:"save_html"`
 	SaveThumbnails         bool                `json:"save_thumbnails"`
 	KeepLists              bool                `json:"keep_lists"`
+	DebugLogging           bool                `json:"debug_logging"`
+	Filters                BoardFilters        `json:"filters"`
+	SkipSticky             bool                `json:"skip_sticky"`
 	UserAgent              string              `json:"user_agent"`
 	StartPaused            bool                `json:"start_paused"`
 }
@@ -76,6 +87,7 @@ func Defaults(savePath string) Settings {
 		FolderName:               FolderNumberSubject,
 		Theme:                    ThemeLight,
 		KeepLists:                true,
+		SkipSticky:               true,
 		UserAgent:                DefaultUserAgent,
 	}
 }
@@ -102,6 +114,13 @@ func (s *Settings) Validate() error {
 	}
 	if s.Theme != ThemeLight && s.Theme != ThemeDark {
 		problems = append(problems, "unknown theme")
+	}
+	var err error
+	if s.Filters.Skip, err = filter.CleanList(s.Filters.Skip); err != nil {
+		problems = append(problems, "skip filter: "+err.Error())
+	}
+	if s.Filters.Only, err = filter.CleanList(s.Filters.Only); err != nil {
+		problems = append(problems, "only filter: "+err.Error())
 	}
 	if strings.TrimSpace(s.UserAgent) == "" {
 		problems = append(problems, "user agent must not be empty")

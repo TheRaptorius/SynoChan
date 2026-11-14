@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"time"
+	"unicode/utf8"
 
 	"synochan/internal/config"
 )
@@ -32,18 +33,22 @@ type threadState struct {
 	Dir          string    `json:"dir,omitempty"`
 	SaveTo       string    `json:"save_to,omitempty"` // Folder of earlier versions; read only.
 	Priority     int       `json:"priority,omitempty"`
+	FromBoard    string    `json:"from_board,omitempty"`
+	MatchSubject string    `json:"match_subject,omitempty"`
+	MatchText    string    `json:"match_text,omitempty"`
 	AddedAt      time.Time `json:"added_at"`
 	SavedAssets  []string  `json:"saved_assets"`
 	FailedAssets []string  `json:"failed_assets,omitempty"`
 }
 
 type boardState struct {
-	Site             string    `json:"site"`
-	Code             string    `json:"code"`
-	GreatestThreadID int64     `json:"greatest_thread_id"`
-	LastModified     time.Time `json:"last_modified,omitzero"`
-	SaveTo           string    `json:"save_to"`
-	AddedAt          time.Time `json:"added_at"`
+	Site             string               `json:"site"`
+	Code             string               `json:"code"`
+	GreatestThreadID int64                `json:"greatest_thread_id"`
+	LastModified     time.Time            `json:"last_modified,omitzero"`
+	SaveTo           string               `json:"save_to"`
+	AddedAt          time.Time            `json:"added_at"`
+	Filters          *config.BoardFilters `json:"filters,omitempty"`
 }
 
 func (t *Thread) state() threadState {
@@ -57,6 +62,9 @@ func (t *Thread) state() threadState {
 		Root:         t.Root,
 		Dir:          t.dir,
 		Priority:     t.prio,
+		FromBoard:    t.FromBoard,
+		MatchSubject: t.matchSubject,
+		MatchText:    truncate(t.matchText, 4000),
 		AddedAt:      t.AddedAt,
 		SavedAssets:  make([]string, 0, len(t.saved)),
 	}
@@ -98,6 +106,8 @@ func (m *Manager) threadFromState(s threadState) *Thread {
 	t := m.newThread(s.Board, s.ID, root)
 	t.dir = dir
 	t.prio = max(0, s.Priority)
+	t.FromBoard = s.FromBoard
+	t.matchSubject, t.matchText = s.MatchSubject, s.MatchText
 	t.AddedAt = s.AddedAt
 	if s.Subject != nil {
 		t.subject, t.subjectSet = *s.Subject, true
@@ -129,7 +139,13 @@ func (m *Manager) threadFromState(s threadState) *Thread {
 func (b *Board) state() boardState {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	var filters *config.BoardFilters
+	if len(b.filters.Skip) > 0 || len(b.filters.Only) > 0 {
+		f := b.filters
+		filters = &f
+	}
 	return boardState{
+		Filters:          filters,
 		Site:             b.Site,
 		Code:             b.Code,
 		GreatestThreadID: b.greatestThreadID,
@@ -144,6 +160,9 @@ func (m *Manager) boardFromState(s boardState) *Board {
 	b.AddedAt = s.AddedAt
 	b.greatestThreadID = s.GreatestThreadID
 	b.lastModified = s.LastModified
+	if s.Filters != nil {
+		b.filters = *s.Filters
+	}
 	return b
 }
 
@@ -173,4 +192,15 @@ func writeState(path string, st stateFile) error {
 		return err
 	}
 	return config.WriteFileAtomic(path, data, 0o640)
+}
+
+// truncate shortens s to at most n bytes without splitting a character.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

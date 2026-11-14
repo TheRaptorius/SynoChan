@@ -31,6 +31,7 @@ import (
 	"synochan/internal/fourchan"
 	"synochan/internal/logx"
 	"synochan/internal/server"
+	"synochan/internal/tokens"
 	"synochan/web"
 )
 
@@ -118,9 +119,10 @@ func runDaemon(args []string) int {
 	if *logStderr {
 		logOut = io.MultiWriter(logFile, os.Stderr)
 	}
-	level := slog.LevelInfo
+	// Switched at run time by the "detailed logging" setting; --debug forces it on.
+	level := new(slog.LevelVar)
 	if *debug {
-		level = slog.LevelDebug
+		level.Set(slog.LevelDebug)
 	}
 	log := slog.New(slog.NewTextHandler(logOut, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(log)
@@ -151,13 +153,22 @@ func runDaemon(args []string) int {
 		Endpoints: endpoints,
 		StatePath: filepath.Join(*dataDir, "state.json"),
 		Logger:    log,
+		LogLevel:  level,
 	})
 	if err := m.Start(); err != nil {
 		log.Error("started with errors", "err", err)
 	}
+	if *debug {
+		level.Set(slog.LevelDebug) // --debug wins over the setting, which Start applied.
+	}
+	tok, err := tokens.Open(filepath.Join(*dataDir, "tokens.json"))
+	if err != nil {
+		log.Error("could not load API tokens", "err", err)
+		return 1
+	}
 	log.Info("SynoChan started", "version", version, "data", *dataDir, "save_path", cfg.Get().SavePath)
 
-	api := server.New(m, server.Info{Version: version, RepoURL: repoURL, Author: author, LogPath: logPath, DataDir: *dataDir})
+	api := server.New(m, tok, server.Info{Version: version, RepoURL: repoURL, Author: author, LogPath: logPath, DataDir: *dataDir})
 
 	os.Remove(*socket)
 	unixLn, err := net.Listen("unix", *socket)

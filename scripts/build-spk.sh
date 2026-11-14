@@ -46,6 +46,13 @@ build 386 386 GO386=softfloat
 mkdir -p "$TARGET/ui"
 cp -R web/static/. "$TARGET/ui/"
 cp package/ui/SynoChan.js "$TARGET/ui/"
+# Versioned asset URLs, so browsers never pair a new page with a cached script or stylesheet.
+sed -i -e "s|href=\"synochan.css\"|href=\"synochan.css?v=$SPK_VERSION\"|" \
+       -e "s|src=\"synochan.js\"|src=\"synochan.js?v=$SPK_VERSION\"|" "$TARGET/ui/app/index.html"
+if ! grep -q "synochan.js?v=$SPK_VERSION" "$TARGET/ui/app/index.html"; then
+    echo "failed to version the UI assets in index.html" >&2
+    exit 1
+fi
 # The version in ui/config lets DSM tell browsers that SynoChan.js changed.
 sed "s|@VERSION@|$SPK_VERSION|g" package/ui/config > "$TARGET/ui/config"
 cp -R package/ui/texts "$TARGET/ui/texts"

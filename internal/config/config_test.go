@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -12,7 +13,7 @@ func TestLoadCreatesDefaultsAndKeepsMissingFields(t *testing.T) {
 	defaults := Defaults("/volume1/synochan")
 
 	s, err := Load(path, defaults)
-	if err != nil || s.Get() != defaults {
+	if err != nil || !reflect.DeepEqual(s.Get(), defaults) {
 		t.Fatalf("first load: %+v %v", s.Get(), err)
 	}
 	if _, err := os.Stat(path); err != nil {

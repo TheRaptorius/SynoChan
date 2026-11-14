@@ -152,6 +152,24 @@ func NewFrontend(socket string, auth Authenticator) *Frontend {
 var apiPath = regexp.MustCompile(`^[a-z]+(/[a-z]+)?$`)
 
 func (f *Frontend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	p := q.Get("path")
+	if !apiPath.MatchString(p) {
+		writeJSONError(w, http.StatusNotFound, "unknown API path")
+		return
+	}
+
+	// Browser extension calls carry an API token instead of a DSM session. The daemon checks the token and
+	// accepts it only on the ext/ routes, so nothing else is reachable this way.
+	if strings.HasPrefix(p, "ext/") {
+		if r.Header.Get(server.TokenHeader) == "" {
+			writeJSONError(w, http.StatusUnauthorized, "missing API token")
+			return
+		}
+		f.forward(w, r, p, q, "")
+		return
+	}
+
 	user, err := f.Auth(r)
 	if err != nil {
 		switch {
@@ -165,21 +183,24 @@ func (f *Frontend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := r.URL.Query()
-	p := q.Get("path")
-	if !apiPath.MatchString(p) {
-		writeJSONError(w, http.StatusNotFound, "unknown API path")
-		return
-	}
+	f.forward(w, r, p, q, user)
+}
+
+func (f *Frontend) forward(w http.ResponseWriter, r *http.Request, p string, q url.Values, user string) {
 	q.Del("path")
 	q.Del("SynoToken")
-
 	out := r.Clone(r.Context())
 	out.URL = &url.URL{Path: "/api/" + p, RawQuery: q.Encode()}
 	out.RequestURI = ""
 	out.Header.Del("Cookie") // The daemon has no use for the DSM session cookie.
 	out.Header.Del("X-Syno-Token")
-	out.Header.Set(server.UserHeader, user)
+	out.Header.Del(server.UserHeader)
+	if user != "" {
+		out.Header.Set(server.UserHeader, user)
+	}
+	if !strings.HasPrefix(p, "ext/") {
+		out.Header.Del(server.TokenHeader)
+	}
 	f.proxy.ServeHTTP(w, out)
 }
 

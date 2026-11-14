@@ -343,13 +343,13 @@ func TestFolderNamesAndRenaming(t *testing.T) {
 	}
 
 	// Removal leaves the folder as it is.
-	if err := h.m.RemoveThread("4chan/g/300"); err != nil {
+	if err := h.m.RemoveThread("4chan/g/300", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(base, "My Name - 300 (1)")); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.m.RemoveThread("4chan/g/300"); err != ErrNotFound {
+	if err := h.m.RemoveThread("4chan/g/300", false); err != ErrNotFound {
 		t.Fatalf("second removal: %v", err)
 	}
 }
@@ -403,7 +403,7 @@ func TestPriorityRenumbering(t *testing.T) {
 	if prio("4chan/g/3") != 0 || prio("4chan/g/1") != 1 || prio("4chan/g/2") != 2 {
 		t.Fatalf("after unprioritize %d %d %d", prio("4chan/g/1"), prio("4chan/g/2"), prio("4chan/g/3"))
 	}
-	h.m.RemoveThread("4chan/g/1")
+	h.m.RemoveThread("4chan/g/1", false)
 	if prio("4chan/g/2") != 1 {
 		t.Fatalf("after removal %d", prio("4chan/g/2"))
 	}
@@ -429,7 +429,7 @@ func TestBoardAddsOnlyNewThreads(t *testing.T) {
 	h.waitFor("catalog thread download", func() bool { v := h.thread("4chan/g/400"); return v != nil && v.Saved == 1 })
 
 	// The user removes a thread: it must not come back on the next board scrape.
-	h.m.RemoveThread("4chan/g/400")
+	h.m.RemoveThread("4chan/g/400", false)
 	h.board.setThread(402, post(402, 0, "", "", nil))
 	h.board.setCatalog(
 		map[string]any{"no": 400, "images": 0},
@@ -573,5 +573,122 @@ func TestSharePath(t *testing.T) {
 		if got := SharePath(in); got != want {
 			t.Errorf("SharePath(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestRemoveWithFilesDeletesOnlyTheThreadFolder(t *testing.T) {
+	h := newHarness(t, nil)
+	h.board.setThread(900, post(900, 1700000009000, "a", ".jpg", map[string]any{"sub": "Delete me"}))
+	h.board.setThread(901, post(901, 1700000009010, "b", ".jpg", map[string]any{"sub": "Keep me"}))
+	h.board.setThread(902, post(902, 0, "", "", map[string]any{"sub": "No files"}))
+	h.m.AddURLs("https://boards.4chan.org/g/thread/900 https://boards.4chan.org/g/thread/901 https://boards.4chan.org/g/thread/902")
+	h.waitFor("downloads", func() bool {
+		a, b := h.thread("4chan/g/900"), h.thread("4chan/g/901")
+		return a != nil && b != nil && a.Saved == 1 && b.Saved == 1
+	})
+	base := filepath.Join(h.root, "4chan", "g")
+	if err := h.m.RemoveThread("4chan/g/900", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "900 - Delete me")); !os.IsNotExist(err) {
+		t.Fatalf("folder not deleted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "901 - Keep me", "901.jpg")); err != nil {
+		t.Fatal("other thread's files touched")
+	}
+	// A thread without a folder yet removes cleanly.
+	if err := h.m.RemoveThread("4chan/g/902", true); err != nil {
+		t.Fatal(err)
+	}
+	// Clearing with files deletes the rest; the board folder itself stays.
+	if errs := h.m.ClearThreads(true); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	entries, _ := os.ReadDir(base)
+	if len(entries) != 0 {
+		t.Fatalf("left over: %v", entries)
+	}
+	if _, err := os.Stat(base); err != nil {
+		t.Fatal("board folder deleted")
+	}
+}
+
+func TestDeleteRefusesFoldersOutsideTheBoard(t *testing.T) {
+	h := newHarness(t, func(s *config.Settings) { s.StartPaused = true })
+	h.m.AddURLs("https://boards.4chan.org/g/thread/950")
+	h.m.mu.Lock()
+	th := h.m.threadByKey["4chan/g/950"]
+	h.m.mu.Unlock()
+	th.mu.Lock()
+	th.dir = h.root // Pretend something pointed the thread at the save root.
+	th.mu.Unlock()
+	if err := h.m.RemoveThread("4chan/g/950", true); err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("expected refusal, got %v", err)
+	}
+	if _, err := os.Stat(h.root); err != nil {
+		t.Fatal("save root deleted")
+	}
+}
+
+func TestBoardFilters(t *testing.T) {
+	h := newHarness(t, func(s *config.Settings) {
+		s.StartPaused = true
+		s.Filters.Skip = []string{"spoiler*", "general thread"}
+	})
+	h.board.setCatalog(
+		map[string]any{"no": 1000, "sub": "Rules", "sticky": 1},
+		map[string]any{"no": 1001, "sub": "Spoilers inside"},
+		map[string]any{"no": 1002, "sub": "Daily", "com": "the GENERAL thread for cats"},
+		map[string]any{"no": 1003, "sub": "Café wallpapers"},
+		map[string]any{"no": 1004, "com": "<span class=\"quote\">&gt;nothing special</span>"},
+	)
+	for id := int64(1000); id <= 1004; id++ {
+		h.board.setThread(id, post(id, 0, "", "", nil))
+	}
+	h.m.AddURLs("https://boards.4chan.org/g/catalog https://boards.4chan.org/g/thread/1001")
+	h.m.SetPaused(false)
+	h.waitFor("board scanned", func() bool { s := h.m.Snapshot(); return len(s.Boards) == 1 && !s.Boards[0].LastCheck.IsZero() })
+	h.m.SetPaused(true)
+
+	keys := map[int64]bool{}
+	for _, v := range h.m.Snapshot().Threads {
+		keys[v.ID] = true
+	}
+	// 1001 was added by hand and stays; 1003 and 1004 pass; the sticky and 1002 are filtered.
+	if !keys[1001] || !keys[1003] || !keys[1004] || keys[1000] || keys[1002] || len(keys) != 3 {
+		t.Fatalf("tracked: %v", keys)
+	}
+	filtered, err := h.m.BoardFiltered("4chan/g")
+	if err != nil || len(filtered) != 2 || filtered[0].Reason != "sticky thread" || filtered[1].Reason != `contains "general thread"` {
+		t.Fatalf("filtered: %+v %v", filtered, err)
+	}
+	if n := h.m.Snapshot().Boards[0].Filtered; n != 2 {
+		t.Fatalf("filtered count %d", n)
+	}
+
+	// A board's own only-list: tracked board threads that no longer fit are offered for removal,
+	// the thread added by hand never is.
+	if err := h.m.SetBoardFilters("4chan/g", config.BoardFilters{Only: []string{"cafe"}}); err != nil {
+		t.Fatal(err)
+	}
+	matches := h.m.FilterMatches("4chan/g")
+	if len(matches) != 1 || matches[0].Key != "4chan/g/1004" {
+		t.Fatalf("matches: %+v", matches)
+	}
+	if err := h.m.SetBoardFilters("4chan/g", config.BoardFilters{Skip: []string{"*"}}); err == nil {
+		t.Fatal("a match-everything filter was accepted")
+	}
+	if err := h.m.SetBoardFilters("4chan/nope", config.BoardFilters{}); err != ErrNotFound {
+		t.Fatalf("unknown board: %v", err)
+	}
+
+	// Board filters and origins survive a restart.
+	h.m.Shutdown(5 * time.Second)
+	h.start()
+	if v := h.m.Snapshot().Boards[0]; len(v.Filters.Only) != 1 || v.Filters.Only[0] != "cafe" {
+		t.Fatalf("board filters not restored: %+v", v.Filters)
+	}
+	if matches := h.m.FilterMatches(""); len(matches) != 1 || matches[0].Key != "4chan/g/1004" {
+		t.Fatalf("origins not restored: %+v", matches)
 	}
 }

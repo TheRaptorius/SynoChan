@@ -16,6 +16,7 @@ import (
 	"synochan/internal/core"
 	"synochan/internal/fetch"
 	"synochan/internal/fourchan"
+	"synochan/internal/tokens"
 )
 
 func newAPI(t *testing.T) (http.Handler, string) {
@@ -32,7 +33,7 @@ func newAPI(t *testing.T) (http.Handler, string) {
 	t.Cleanup(func() { m.Shutdown(time.Second) })
 	logPath := filepath.Join(t.TempDir(), "log")
 	os.WriteFile(logPath, []byte("one\ntwo\nthree\n"), 0o644)
-	return New(m, Info{Version: "1.2.3", RepoURL: "https://example.org/repo", Author: "someone", LogPath: logPath}), logPath
+	return New(m, tokens.NewMemory(), Info{Version: "1.2.3", RepoURL: "https://example.org/repo", Author: "someone", LogPath: logPath}), logPath
 }
 
 func call(t *testing.T, h http.Handler, method, path, body string) (int, map[string]any) {
@@ -144,4 +145,43 @@ func TestAPISettings(t *testing.T) {
 func jsonNumber(f float64) string {
 	b, _ := json.Marshal(f)
 	return string(b)
+}
+
+func callWithToken(t *testing.T, h http.Handler, method, path, body, token string) (int, map[string]any) {
+	t.Helper()
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	if token != "" {
+		r.Header.Set(TokenHeader, token)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	out := map[string]any{}
+	json.Unmarshal(w.Body.Bytes(), &out)
+	return w.Code, out
+}
+
+func TestExtensionTokens(t *testing.T) {
+	h, _ := newAPI(t)
+	if code, _ := callWithToken(t, h, "GET", "/api/ext/ping", "", ""); code != 401 {
+		t.Fatalf("ping without token: %d", code)
+	}
+	_, created := call(t, h, "POST", "/api/tokens/create", `{"name":"Chrome"}`)
+	secret := created["secret"].(string)
+	id := created["token"].(map[string]any)["id"].(string)
+	if code, out := callWithToken(t, h, "GET", "/api/ext/ping", "", secret); code != 200 || out["version"] != "1.2.3" {
+		t.Fatalf("ping: %d %v", code, out)
+	}
+	code, out := callWithToken(t, h, "POST", "/api/ext/add", `{"urls":["https://boards.4chan.org/g/thread/77","nope"]}`, secret)
+	if code != 200 || len(out["results"].([]any)) != 2 {
+		t.Fatalf("add: %d %v", code, out)
+	}
+	_, list := call(t, h, "GET", "/api/tokens", "")
+	toks := list["tokens"].([]any)
+	if len(toks) != 1 || toks[0].(map[string]any)["hash"] != nil {
+		t.Fatalf("list leaks or misses tokens: %v", toks)
+	}
+	call(t, h, "POST", "/api/tokens/revoke", `{"id":"`+id+`"}`)
+	if code, _ := callWithToken(t, h, "POST", "/api/ext/add", `{"urls":[]}`, secret); code != 401 {
+		t.Fatalf("revoked token accepted: %d", code)
+	}
 }

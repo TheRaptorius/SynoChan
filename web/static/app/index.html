@@ -111,6 +111,22 @@
       </label>
     </fieldset>
     <fieldset>
+      <legend>Board filters</legend>
+      <p class="hint">Decide which threads boards add. Threads you add yourself are never filtered.
+        Entries match whole words, ignoring case and accents; a phrase matches its words in order.
+        Use <code>*</code> for more letters: <code>trap*</code> also matches “trapped”.</p>
+      <div class="field">
+        <span>Skip threads containing</span>
+        <div class="tags" id="settings-skip" data-placeholder="Type a word or phrase, then Enter"></div>
+      </div>
+      <div class="field">
+        <span>Only threads containing</span>
+        <div class="tags" id="settings-only" data-placeholder="Leave empty to allow everything"></div>
+        <small>Subject and opening post are searched. If both lists match, the thread is skipped.</small>
+      </div>
+      <label class="check"><input name="skip_sticky" type="checkbox"> Skip sticky threads (rules, FAQs)</label>
+    </fieldset>
+    <fieldset>
       <legend>Appearance</legend>
       <label class="field">
         <span>Theme</span>
@@ -125,6 +141,27 @@
       <legend>Lists</legend>
       <label class="check"><input name="keep_lists" type="checkbox"> Keep tracked threads and boards after a restart</label>
       <label class="check"><input name="start_paused" type="checkbox"> Start paused</label>
+    </fieldset>
+    <fieldset>
+      <legend>Browser extension</legend>
+      <p class="hint">The SynoChan browser extension adds links from 4chan with a right click. It signs in with an API token instead of your DSM password; a token can only add links.</p>
+      <div class="field">
+        <span>Server address</span>
+        <div class="copy-row"><code id="ext-server"></code><button type="button" class="quiet" id="ext-server-copy">Copy</button></div>
+      </div>
+      <div id="token-list" class="token-list"></div>
+      <div class="copy-row">
+        <input type="text" id="token-name" placeholder="Token name, e.g. Chrome on laptop" maxlength="80" spellcheck="false">
+        <button type="button" id="token-create">Create token</button>
+      </div>
+      <div class="token-new" id="token-new" hidden>
+        <p>Copy this token into the extension now. It is not shown again.</p>
+        <div class="copy-row"><code id="token-secret"></code><button type="button" class="primary" id="token-copy">Copy</button></div>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Troubleshooting</legend>
+      <label class="check"><input name="debug_logging" type="checkbox"> Detailed logging (every request and download)</label>
     </fieldset>
     <p class="form-error" id="settings-error" role="alert" hidden></p>
     <div class="dialog-actions">
@@ -153,9 +190,42 @@
   <form method="dialog">
     <h2 id="confirm-title"></h2>
     <p id="confirm-text"></p>
+    <label class="check" id="confirm-check-row" hidden><input type="checkbox" id="confirm-check"> <span id="confirm-check-label"></span></label>
     <div class="dialog-actions">
       <button value="cancel" class="quiet">Cancel</button>
       <button value="ok" class="primary danger" id="confirm-ok"></button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="board-filters-dialog">
+  <form method="dialog" id="board-filters-form">
+    <h2 id="board-filters-title">Board filters</h2>
+    <p class="hint">These apply to this board on top of the filters in Settings: skipped words add to the global ones,
+      and an “only” list here replaces the global one for this board.</p>
+    <div class="field">
+      <span>Also skip threads containing</span>
+      <div class="tags" id="board-skip" data-placeholder="Type a word or phrase, then Enter"></div>
+    </div>
+    <div class="field">
+      <span>Only threads containing</span>
+      <div class="tags" id="board-only" data-placeholder="Empty: the global list applies"></div>
+    </div>
+    <p class="form-error" id="board-filters-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button value="cancel" formnovalidate class="quiet">Cancel</button>
+      <button value="save" class="primary" id="board-filters-save">Save filters</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="filtered-dialog" class="wide">
+  <form method="dialog">
+    <h2 id="filtered-title">Filtered threads</h2>
+    <p class="hint">Threads on the board right now that the filters keep out. Add one anyway to track it like a thread you added yourself.</p>
+    <div class="filtered-list" id="filtered-list"></div>
+    <div class="dialog-actions">
+      <button value="ok" class="primary">Close</button>
     </div>
   </form>
 </dialog>
@@ -173,6 +243,13 @@
 <dialog id="logs-dialog" class="wide">
   <form method="dialog">
     <h2>Log</h2>
+    <label class="field inline">
+      <span>Show</span>
+      <select id="log-level">
+        <option value="all">Everything</option>
+        <option value="problems">Warnings and errors</option>
+      </select>
+    </label>
     <pre class="log" id="log-text"></pre>
     <div class="dialog-actions">
       <button type="button" class="quiet" id="log-refresh">Refresh</button>

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="ui.css">
+</head>
+<body class="popup">
+  <header>
+    <img src="icons/icon_32.png" alt="" width="24" height="24">
+    <strong>SynoChan</strong>
+    <button type="button" class="quiet" id="open-options" title="Settings">Settings</button>
+  </header>
+
+  <section id="setup" hidden>
+    <p>Connect the extension to SynoChan on your NAS first.</p>
+    <button type="button" class="primary" id="setup-button">Open settings</button>
+  </section>
+
+  <main id="main" hidden>
+    <section class="current">
+      <div class="current-label" id="current-label">This page</div>
+      <button type="button" class="primary" id="add-current">Add this page</button>
+    </section>
+
+    <section>
+      <label for="bulk">Add several links, one per line</label>
+      <textarea id="bulk" rows="4" spellcheck="false" placeholder="https://boards.4chan.org/g/thread/…"></textarea>
+      <button type="button" id="add-bulk">Add links</button>
+    </section>
+
+    <section class="queue" id="queue" hidden>
+      <span id="queue-text"></span>
+      <button type="button" class="quiet" id="retry">Retry now</button>
+    </section>
+
+    <p class="status" id="status" role="status"></p>
+
+    <button type="button" class="wide" id="open-synochan">Open SynoChan in DSM</button>
+  </main>
+
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

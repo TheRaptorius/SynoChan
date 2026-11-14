@@ -137,6 +137,7 @@ type Post struct {
 	Filename *string         `json:"filename"`
 	Ext      *string         `json:"ext"`
 	Images   int             `json:"images"`
+	Sticky   int             `json:"sticky"`
 }
 
 // HasFile reports whether the post carries an upload.
@@ -251,9 +252,9 @@ var (
 	urlRe       = regexp.MustCompile(`(?i)\bhttps?://\S+`)
 )
 
-// SubjectFromText turns a post's HTML into a short subject: reply links, tags and URLs are removed,
-// greentext arrows dropped, whitespace collapsed, and the text cut at a word boundary to at most max runes.
-func SubjectFromText(com string, max int) string {
+// PostText turns a post's HTML into plain text: reply links, tags and URLs are removed, greentext arrows
+// dropped and whitespace collapsed.
+func PostText(com string) string {
 	com = quoteLinkRe.ReplaceAllString(com, " ")
 	com = lineBreakRe.ReplaceAllString(com, " ")
 	com = tagRe.ReplaceAllString(com, "")
@@ -263,7 +264,27 @@ func SubjectFromText(com string, max int) string {
 	for i, w := range words {
 		words[i] = strings.TrimLeft(w, ">")
 	}
-	text := strings.Join(strings.Fields(strings.Join(words, " ")), " ")
+	return strings.Join(strings.Fields(strings.Join(words, " ")), " ")
+}
+
+// FilterText is what board filters search in an opening post: subject, name and text.
+func FilterText(p *Post) (subject, text string) {
+	if p.Sub != nil {
+		subject = html.UnescapeString(*p.Sub)
+	}
+	if p.Name != nil && *p.Name != "Anonymous" {
+		subject += " " + html.UnescapeString(*p.Name)
+	}
+	if p.Com != nil {
+		text = PostText(*p.Com)
+	}
+	return subject, text
+}
+
+// SubjectFromText turns a post's HTML into a short subject: the plain text (see PostText) cut at a word
+// boundary to at most max runes.
+func SubjectFromText(com string, max int) string {
+	text := PostText(com)
 	if utf8.RuneCountInString(text) <= max {
 		return text
 	}

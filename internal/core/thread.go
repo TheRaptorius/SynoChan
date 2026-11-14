@@ -30,9 +30,13 @@ type Thread struct {
 	ID      int64
 	Root    string // Save folder at the time the thread was added; its folder is created below it.
 	AddedAt time.Time
+	// FromBoard is the key of the board that added the thread; empty for threads added by the user.
+	// Only threads added by a board are ever removed because of filters.
+	FromBoard string
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	active sync.WaitGroup // Writes into the thread's folder in flight.
 
 	mu             sync.Mutex
 	dir            string // The thread's folder once created, "" before the first file.
@@ -48,8 +52,10 @@ type Thread struct {
 	saved          map[AssetID]struct{} // Assets that were saved to disk.
 	failed         map[AssetID]struct{} // Assets the queue gave up on.
 	lane           queue.Lane
-	prio           int  // User priority: 1 is downloaded first, 0 means none.
-	prioChecked    bool // A check finished since the thread was prioritised.
+	prio           int    // User priority: 1 is downloaded first, 0 means none.
+	matchSubject   string // Subject and name as filters search them (board threads only).
+	matchText      string // Opening post text as filters search it (board threads only).
+	prioChecked    bool   // A check finished since the thread was prioritised.
 }
 
 func (m *Manager) newThread(board string, id int64, root string) *Thread {
@@ -139,6 +145,10 @@ func (t *Thread) plannedDirLocked() string {
 func (t *Thread) ensureDir() (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if !t.ShouldProcess() {
+		// Removed meanwhile; its folder may be being deleted, so never create it again.
+		return "", context.Canceled
+	}
 	if t.dir != "" {
 		if _, err := os.Stat(t.dir); err == nil {
 			return t.dir, nil
@@ -280,6 +290,8 @@ func (t *Thread) Process(ctx context.Context) (queue.Result, error) {
 	var thumbs []fourchan.ThumbInfo
 
 	if s.SaveHTML {
+		t.active.Add(1)
+		defer t.active.Done()
 		// A second request in one check: keep it a second apart from the first.
 		select {
 		case <-time.After(apiSpacing):

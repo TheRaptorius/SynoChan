@@ -122,8 +122,11 @@
       { key: 'save_to', label: 'Folder', hiddenByDefault: true, sort: (t) => t.save_to, cell: (t) => el('td', { class: 'muted' }, t.share_path || t.save_to) },
     ],
     boards: [
-      { key: 'code', label: 'Board', sort: (b) => b.code, cell: (b) => el('td', { class: 'board' }, `/${b.code}/`), fixed: true },
+      { key: 'code', label: 'Board', sort: (b) => b.code, fixed: true, cell: (b) => el('td', { class: 'board' }, `/${b.code}/`,
+        hasOwnFilters(b) ? el('span', { class: 'own-filters', title: 'This board has its own filters' }, 'filters') : null) },
       { key: 'thread_count', label: 'Threads on board', num: true, sort: (b) => b.thread_count, cell: (b) => el('td', { class: 'num' }, b.thread_count) },
+      { key: 'filtered', label: 'Filtered', num: true, sort: (b) => b.filtered || 0, cell: (b) => el('td', { class: 'num' },
+        b.filtered ? el('button', { type: 'button', class: 'count-link', title: 'Show filtered threads', onclick: (e) => { e.stopPropagation(); showFiltered(b); } }, b.filtered) : '0') },
       { key: 'last_check', label: 'Checked', sort: (b) => b.last_check || '', cell: (b) => el('td', { class: 'when', title: absTime(b.last_check) }, relTime(b.last_check)) },
       { key: 'next_check', label: 'Next check', sort: (b) => b.next_check || '', cell: (b) => el('td', { class: 'when', title: absTime(b.next_check) }, nextCheck(b)) },
       { key: 'added_at', label: 'Added', sort: (b) => b.added_at || '', cell: (b) => el('td', { class: 'when', title: absTime(b.added_at) }, relTime(b.added_at)) },
@@ -450,7 +453,7 @@
 
   // ---------- Actions ----------
 
-  async function addText(text) {
+  async function addText(text, { stayOnTab = false } = {}) {
     try {
       const { results } = await api('add', { method: 'POST', body: { text } });
       const added = results.filter((r) => r.status === 'added');
@@ -461,8 +464,8 @@
         const boards = added.length - threads;
         const what = [threads && `${threads} thread${threads > 1 ? 's' : ''}`, boards && `${boards} board${boards > 1 ? 's' : ''}`].filter(Boolean).join(' and ');
         toast(`Tracking ${what}.`);
-        if (threads === 0 && boards > 0 && state.tab !== 'boards') switchTab('boards');
-        if (boards === 0 && threads > 0 && state.tab !== 'threads') switchTab('threads');
+        if (!stayOnTab && threads === 0 && boards > 0 && state.tab !== 'boards') switchTab('boards');
+        if (!stayOnTab && boards === 0 && threads > 0 && state.tab !== 'threads') switchTab('threads');
       }
       for (const d of dups) {
         toast(`Already tracking ${d.kind === 'thread' ? 'this thread' : 'this board'}.`, d.folder_exists ? {
@@ -516,27 +519,39 @@
     return (state.snapshot[state.tab] || []).filter((x) => sel.has(x.key));
   }
 
-  async function removeItems(list) {
+  // deleteFiles: true deletes without asking (the caller confirmed), undefined asks for several items.
+  async function removeItems(list, deleteFiles) {
     if (!list.length) return;
     const tab = state.tab;
     const noun = tab === 'threads' ? 'thread' : 'board';
-    if (list.length > 1) {
-      const ok = await confirmDialog(`Remove ${list.length} ${noun}s?`,
+    if (list.length > 1 && deleteFiles === undefined) {
+      const answer = await confirmDialog(`Remove ${list.length} ${noun}s?`,
         tab === 'threads'
-          ? 'They stop being checked. Files already saved stay where they are.'
+          ? 'They stop being checked. Saved files stay where they are unless you delete them too.'
           : 'They stop being checked. Threads they added stay in the thread list.',
-        `Remove ${list.length} ${noun}s`);
-      if (!ok) return;
+        `Remove ${list.length} ${noun}s`,
+        tab === 'threads' ? 'Also delete their downloaded files' : null);
+      if (!answer) return;
+      deleteFiles = answer.checked;
     }
+    deleteFiles = !!deleteFiles && tab === 'threads';
     try {
-      const res = await api(`${tab}/remove`, { method: 'POST', body: { keys: list.map((x) => x.key) } });
+      const res = await api(`${tab}/remove`, { method: 'POST', body: { keys: list.map((x) => x.key), delete_files: deleteFiles } });
       for (const err of (res.errors || [])) toast(err.error, { error: true, timeout: 10000 });
       list.forEach((x) => state.selected[tab].delete(x.key));
-      toast(list.length === 1 ? `Removed ${describe(list[0])}.` : `Removed ${list.length} ${noun}s.`);
+      const what = list.length === 1 ? describe(list[0]) : `${list.length} ${noun}s`;
+      toast(deleteFiles ? `Removed ${what} and deleted the files.` : `Removed ${what}.`);
       refreshSoon();
     } catch (e) {
       toast(e.message, { error: true });
     }
+  }
+
+  async function removeWithFolder(x) {
+    const answer = await confirmDialog('Remove thread and delete its files?',
+      `“${x.subject}” stops being checked and its folder is deleted with everything in it. This cannot be undone.`,
+      'Remove and delete');
+    if (answer) removeItems([x], true);
   }
 
   const describe = (x) => (x.board !== undefined && x.id ? `“${x.subject}”` : `/${x.code}/`);
@@ -547,16 +562,18 @@
     const tab = state.tab;
     const count = (state.snapshot[tab] || []).length;
     if (!count) return;
-    const ok = await confirmDialog(`Remove all ${tab}?`,
+    const answer = await confirmDialog(`Remove all ${tab}?`,
       tab === 'threads'
-        ? `All ${count} threads stop being checked. Files already saved stay where they are.`
+        ? `All ${count} threads stop being checked. Saved files stay where they are unless you delete them too.`
         : `All ${count} boards stop being checked. Threads they added stay in the thread list.`,
-      `Remove all ${tab}`);
-    if (!ok) return;
+      `Remove all ${tab}`,
+      tab === 'threads' ? 'Also delete their downloaded files' : null);
+    if (!answer) return;
     try {
-      await api(`${tab}/clear`, { method: 'POST' });
+      const res = await api(`${tab}/clear`, { method: 'POST', body: { delete_files: answer.checked } });
+      for (const err of ((res && res.errors) || []).slice(0, 3)) toast(err.error, { error: true, timeout: 10000 });
       state.selected[tab].clear();
-      toast(`Removed all ${tab}.`);
+      toast(answer.checked ? `Removed all ${tab} and deleted their files.` : `Removed all ${tab}.`);
       refreshSoon();
     } catch (e) {
       toast(e.message, { error: true });
@@ -623,15 +640,21 @@
     input.select();
   }
 
-  function confirmDialog(title, text, okLabel) {
+  // Resolves to false when cancelled, otherwise to { checked } (the optional checkbox's state).
+  function confirmDialog(title, text, okLabel, checkboxLabel) {
     const dialog = $('#confirm-dialog');
     $('#confirm-title').textContent = title;
     $('#confirm-text').textContent = text;
     $('#confirm-ok').textContent = okLabel;
+    const row = $('#confirm-check-row');
+    const box = $('#confirm-check');
+    row.hidden = !checkboxLabel;
+    box.checked = false;
+    $('#confirm-check-label').textContent = checkboxLabel || '';
     dialog.returnValue = '';
     dialog.showModal();
     return new Promise((resolve) => {
-      dialog.onclose = () => resolve(dialog.returnValue === 'ok');
+      dialog.onclose = () => resolve(dialog.returnValue === 'ok' ? { checked: !row.hidden && box.checked } : false);
     });
   }
 
@@ -649,7 +672,6 @@
       const sel = selectedItems();
       if (state.tab === 'threads') {
         entries.push(btn(`Prioritize ${sel.length} threads`, () => setPriority(sel, 'last')));
-        entries.push(btn('Download these first', () => setPriority(sel, 'first')));
         if (sel.some((s) => s.priority)) entries.push(btn('Remove priority', () => setPriority(sel, 'none')));
         entries.push(el('hr'));
       }
@@ -673,9 +695,16 @@
         toast(ok ? 'Link copied.' : 'Copying failed.', { error: !ok });
       }));
       if (state.tab === 'threads') entries.push(btn('Rename…', () => renameThread(x)));
+      if (state.tab === 'boards') {
+        entries.push(btn('Filters…', () => editBoardFilters(x)));
+        entries.push(btn(`Show filtered threads (${x.filtered || 0})`, () => showFiltered(x), x.filtered ? {} : { disabled: true }));
+      }
       if (x.last_error) entries.push(btn('Copy problem details', () => copyText(x.last_error).then(() => toast('Copied.'))));
       entries.push(el('hr'));
-      entries.push(btn(state.tab === 'threads' ? 'Remove thread' : 'Remove board', () => removeItems([x]), { class: 'danger' }));
+      entries.push(btn(state.tab === 'threads' ? 'Remove thread' : 'Remove board', () => removeItems([x], false), { class: 'danger' }));
+      if (state.tab === 'threads') {
+        entries.push(btn('Remove and delete folder', () => removeWithFolder(x), { class: 'danger' }));
+      }
     }
     menu.replaceChildren(...entries);
     // Measure at the top left first, so the size is not affected by a previous position.
@@ -797,7 +826,13 @@
       if (input.type === 'checkbox') input.checked = !!v;
       else input.value = String(v);
     }
+    settingsSkip.set(settings.filters.skip);
+    settingsOnly.set(settings.filters.only);
+    state.filtersBefore = JSON.stringify(settings.filters) + settings.skip_sticky;
     syncSettingsForm();
+    $('#token-new').hidden = true;
+    $('#token-secret').textContent = '';
+    loadTokens();
     dialog.showModal();
   }
 
@@ -805,6 +840,243 @@
     const f = $('#settings-form').elements;
     f.save_thumbnails.disabled = !f.save_html.checked;
   }
+
+  // ---------- Tag input ----------
+
+  const foldText = (s) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+  // A list of words or phrases edited as chips. Enter or a comma adds what is typed; pasting adds every
+  // comma or line separated entry; Backspace in the empty field removes the last chip.
+  function tagInput(root) {
+    let values = [];
+    const entry = el('input', { type: 'text', class: 'tag-entry', spellcheck: 'false', placeholder: root.dataset.placeholder || '', 'aria-label': root.previousElementSibling ? root.previousElementSibling.textContent : 'Entries' });
+    entry.setAttribute('data-gramm', 'false');
+    const bubble = el('div', { class: 'tag-suggest', hidden: true });
+
+    const problem = (text) => {
+      if (!/[\p{L}\p{N}]/u.test(text)) return 'Needs a letter or digit';
+      if (text.split(' ').some((w) => w.replace(/^\*|\*$/g, '').includes('*'))) return '“*” only at the start or end of a word';
+      if (text.length > 100) return 'At most 100 characters';
+      return null;
+    };
+    const render = () => {
+      const chips = values.map((v, i) => el('span', { class: 'chip', dataset: { i } }, el('span', {}, v),
+        el('button', { type: 'button', 'aria-label': `Remove ${v}`, title: 'Remove', onclick: (e) => {
+          e.stopPropagation(); values.splice(i, 1); render(); entry.focus();
+        } }, '×')));
+      root.replaceChildren(...chips, entry, bubble);
+      entry.placeholder = values.length ? '' : (root.dataset.placeholder || '');
+    };
+    const add = (raw) => {
+      const text = raw.replace(/\s+/g, ' ').trim();
+      if (!text) return true;
+      const err = problem(text);
+      if (err) { showBubble(err, true); return false; }
+      const dup = values.findIndex((v) => foldText(v) === foldText(text));
+      if (dup >= 0) {
+        const chip = root.querySelector(`.chip[data-i="${dup}"]`);
+        if (chip) { chip.classList.remove('flash'); void chip.offsetWidth; chip.classList.add('flash'); }
+        return true;
+      }
+      values.push(text);
+      render();
+      return true;
+    };
+    const showBubble = (text, error) => {
+      bubble.textContent = text;
+      bubble.className = error ? 'tag-suggest error' : 'tag-suggest';
+      bubble.style.left = Math.max(0, entry.offsetLeft) + 'px';
+      bubble.hidden = false;
+    };
+    const updateBubble = () => {
+      const text = entry.value.trim();
+      if (!text) { bubble.hidden = true; return; }
+      const err = problem(text.replace(/\s+/g, ' '));
+      if (err) showBubble(err, true);
+      else showBubble(`Add “${text}”`, false);
+    };
+    const commit = () => {
+      if (add(entry.value)) { entry.value = ''; bubble.hidden = true; }
+    };
+
+    entry.addEventListener('input', () => {
+      if (entry.value.includes(',')) {
+        const parts = entry.value.split(',');
+        const rest = parts.pop();
+        parts.forEach(add);
+        entry.value = rest;
+      }
+      updateBubble();
+    });
+    entry.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      else if (e.key === 'Escape' && entry.value) { e.preventDefault(); e.stopPropagation(); entry.value = ''; bubble.hidden = true; }
+      else if (e.key === 'Backspace' && !entry.value && values.length) { values.pop(); render(); entry.focus(); }
+    });
+    entry.addEventListener('paste', (e) => {
+      const text = e.clipboardData.getData('text');
+      if (!/[,\n]/.test(text)) return;
+      e.preventDefault();
+      text.split(/[,\r\n]+/).forEach(add);
+      updateBubble();
+    });
+    entry.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== entry) bubble.hidden = true; }, 150));
+    bubble.addEventListener('mousedown', (e) => { e.preventDefault(); if (!bubble.classList.contains('error')) commit(); });
+    root.addEventListener('click', (e) => { if (e.target === root) entry.focus(); });
+
+    render();
+    return {
+      // What is still typed but not added counts too, so it is not lost on Save.
+      get: () => { if (entry.value.trim()) commit(); return [...values]; },
+      set: (list) => { values = [...(list || [])]; entry.value = ''; bubble.hidden = true; render(); },
+    };
+  }
+
+  const settingsSkip = tagInput($('#settings-skip'));
+  const settingsOnly = tagInput($('#settings-only'));
+  const boardSkip = tagInput($('#board-skip'));
+  const boardOnly = tagInput($('#board-only'));
+
+  // ---------- Board filters ----------
+
+  const hasOwnFilters = (b) => !!(b.filters && ((b.filters.skip || []).length || (b.filters.only || []).length));
+
+  function editBoardFilters(b) {
+    const dialog = $('#board-filters-dialog');
+    $('#board-filters-title').textContent = `Filters for /${b.code}/`;
+    boardSkip.set(b.filters && b.filters.skip);
+    boardOnly.set(b.filters && b.filters.only);
+    $('#board-filters-error').hidden = true;
+    dialog.dataset.key = b.key;
+    dialog.showModal();
+  }
+
+  $('#board-filters-form').addEventListener('submit', async (e) => {
+    if (e.submitter && e.submitter.value === 'cancel') return;
+    e.preventDefault();
+    const dialog = $('#board-filters-dialog');
+    const key = dialog.dataset.key;
+    try {
+      await api('boards/filters', { method: 'POST', body: { key, skip: boardSkip.get(), only: boardOnly.get() } });
+      dialog.close('save');
+      toast('Board filters saved.');
+      refreshSoon();
+      offerFilterCleanup(key);
+    } catch (err) {
+      const box = $('#board-filters-error');
+      box.textContent = err.message;
+      box.hidden = false;
+    }
+  });
+
+  async function showFiltered(b) {
+    const dialog = $('#filtered-dialog');
+    const list = $('#filtered-list');
+    $('#filtered-title').textContent = `Filtered threads on /${b.code}/`;
+    list.replaceChildren(el('p', { class: 'hint' }, 'Loading…'));
+    dialog.showModal();
+    try {
+      const { threads } = await api('boards/filtered', { query: { key: b.key } });
+      if (!threads.length) {
+        list.replaceChildren(el('p', { class: 'hint' }, 'No threads on the board are filtered right now.'));
+        return;
+      }
+      list.replaceChildren(...threads.map((t) => {
+        const row = el('div', { class: 'filtered-row' },
+          el('span', { class: 'subject', title: t.subject }, t.subject),
+          el('span', { class: 'reason' }, `#${t.id} · ${t.reason}`),
+          el('span', { class: 'row-actions' },
+            el('a', { href: t.url, target: '_blank', rel: 'noopener' }, 'Open'),
+            el('button', { type: 'button', onclick: async (e) => {
+              e.currentTarget.disabled = true;
+              const ok = await addText(t.url, { stayOnTab: true });
+              if (ok) row.remove();
+              if (!list.querySelector('.filtered-row')) list.replaceChildren(el('p', { class: 'hint' }, 'No threads on the board are filtered right now.'));
+            } }, 'Add anyway')));
+        return row;
+      }));
+    } catch (err) {
+      list.replaceChildren(el('p', { class: 'form-error' }, err.message));
+    }
+  }
+
+  // After filters change, offer to remove tracked threads (added by boards) that the new filters keep out.
+  async function offerFilterCleanup(boardKey) {
+    let threads;
+    try {
+      ({ threads } = await api('filters/matches', { query: boardKey ? { board: boardKey } : {} }));
+    } catch (e) {
+      return;
+    }
+    if (!threads.length) return;
+    const shown = threads.slice(0, 6).map((t) => `“${t.subject}”`).join(', ');
+    const more = threads.length > 6 ? ` and ${threads.length - 6} more` : '';
+    const n = threads.length;
+    const answer = await confirmDialog(
+      `${n} tracked thread${n > 1 ? 's match' : ' matches'} the new filters`,
+      `${shown}${more} ${n > 1 ? 'were' : 'was'} added by a board and would be filtered now. Remove ${n > 1 ? 'them' : 'it'}? Threads you added yourself are never removed by filters.`,
+      `Remove ${n} thread${n > 1 ? 's' : ''}`,
+      'Also delete their downloaded files');
+    if (!answer) return;
+    try {
+      const res = await api('threads/remove', { method: 'POST', body: { keys: threads.map((t) => t.key), delete_files: answer.checked } });
+      for (const err of (res.errors || []).slice(0, 3)) toast(err.error, { error: true, timeout: 10000 });
+      toast(`Removed ${n} thread${n > 1 ? 's' : ''}.`);
+      refreshSoon();
+    } catch (e) {
+      toast(e.message, { error: true });
+    }
+  }
+
+  // ---------- Browser extension tokens ----------
+
+  // The address the extension uses is the one DSM is open on.
+  function dsmOrigin() {
+    try { return window.top.location.origin; } catch (e) { return window.location.origin; }
+  }
+
+  async function loadTokens() {
+    $('#ext-server').textContent = dsmOrigin();
+    const list = $('#token-list');
+    try {
+      const { tokens } = await api('tokens');
+      list.replaceChildren(...(tokens.length ? tokens.map((t) => el('div', { class: 'token-row' },
+        el('span', { class: 'name' }, t.name),
+        el('span', { class: 'meta' }, `created ${absTime(t.created)}` + (t.last_used ? `, last used ${relTime(t.last_used)}` : ', never used')),
+        el('button', { type: 'button', class: 'quiet danger', onclick: async () => {
+          const answer = await confirmDialog(`Revoke “${t.name}”?`, 'Extensions using this token can no longer add links.', 'Revoke token');
+          if (!answer) return;
+          try { await api('tokens/revoke', { method: 'POST', body: { id: t.id } }); } catch (e) { toast(e.message, { error: true }); }
+          loadTokens();
+        } }, 'Revoke'))) : [el('p', { class: 'hint' }, 'No tokens yet.')]));
+    } catch (e) {
+      list.replaceChildren(el('p', { class: 'form-error' }, e.message));
+    }
+  }
+
+  $('#ext-server-copy').addEventListener('click', async () => {
+    const ok = await copyText(dsmOrigin());
+    toast(ok ? 'Address copied.' : 'Copying failed.', { error: !ok });
+  });
+  $('#token-create').addEventListener('click', async () => {
+    try {
+      const { secret } = await api('tokens/create', { method: 'POST', body: { name: $('#token-name').value } });
+      $('#token-secret').textContent = secret;
+      $('#token-new').hidden = false;
+      $('#token-name').value = '';
+      loadTokens();
+    } catch (e) {
+      toast(e.message, { error: true });
+    }
+  });
+  // Enter in the name field creates the token instead of submitting the settings form.
+  $('#token-name').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $('#token-create').click(); }
+  });
+  $('#token-copy').addEventListener('click', async () => {
+    const ok = await copyText($('#token-secret').textContent);
+    toast(ok ? 'Token copied.' : 'Copying failed.', { error: !ok });
+  });
 
   // ---------- Theme ----------
 
@@ -834,6 +1106,9 @@
       space_downloads: f.space_downloads.checked,
       user_agent: f.user_agent.value.trim(),
       keep_lists: f.keep_lists.checked,
+      debug_logging: f.debug_logging.checked,
+      filters: { skip: settingsSkip.get(), only: settingsOnly.get() },
+      skip_sticky: f.skip_sticky.checked,
       start_paused: f.start_paused.checked,
     };
     const save = $('#settings-save');
@@ -844,6 +1119,7 @@
       $('#settings-dialog').close('save');
       toast('Settings saved.');
       refreshSoon();
+      if (JSON.stringify(saved.filters) + saved.skip_sticky !== state.filtersBefore) offerFilterCleanup('');
     } catch (err) {
       const box = $('#settings-error');
       box.textContent = err.message;
@@ -875,11 +1151,15 @@
 
   // ---------- Log and about ----------
 
+  const PROBLEM_LINE = /level=(WARN|ERROR)/;
+
   async function loadLogs() {
     const pre = $('#log-text');
+    const problemsOnly = $('#log-level').value === 'problems';
     try {
-      const { lines } = await api('logs', { query: { lines: 400 } });
-      pre.textContent = lines.length ? lines.join('\n') : 'The log is empty.';
+      let { lines } = await api('logs', { query: { lines: problemsOnly ? 5000 : 400 } });
+      if (problemsOnly) lines = lines.filter((l) => PROBLEM_LINE.test(l));
+      pre.textContent = lines.length ? lines.join('\n') : (problemsOnly ? 'No warnings or errors.' : 'The log is empty.');
       pre.scrollTop = pre.scrollHeight;
     } catch (e) {
       pre.textContent = e.message;
@@ -891,6 +1171,7 @@
     loadLogs();
   }
   $('#log-refresh').addEventListener('click', loadLogs);
+  $('#log-level').addEventListener('change', loadLogs);
 
   async function fullLog() {
     const { lines } = await api('logs', { query: { lines: 5000 } });

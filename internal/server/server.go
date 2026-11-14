@@ -8,14 +8,20 @@ import (
 	"net/http"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
+	"synochan/internal/config"
 	"synochan/internal/core"
 	"synochan/internal/logx"
+	"synochan/internal/tokens"
 )
 
 // UserHeader carries the DSM user name from the CGI front end to the daemon.
 const UserHeader = "X-Synochan-User"
+
+// TokenHeader carries a browser extension's API token. Only the /api/ext/ routes accept it.
+const TokenHeader = "X-Synochan-Token"
 
 // Info is static information about the running instance.
 type Info struct {
@@ -28,13 +34,15 @@ type Info struct {
 
 type handler struct {
 	m       *core.Manager
+	tokens  *tokens.Store
 	info    Info
 	started time.Time
 }
 
-// New returns the API handler. Routes live under /api/.
-func New(m *core.Manager, info Info) http.Handler {
-	h := &handler{m: m, info: info, started: time.Now()}
+// New returns the API handler. Routes live under /api/; /api/ext/ routes are for the browser extension and
+// require an API token instead of a DSM session.
+func New(m *core.Manager, tok *tokens.Store, info Info) http.Handler {
+	h := &handler{m: m, tokens: tok, info: info, started: time.Now()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/state", h.state)
 	mux.HandleFunc("GET /api/info", h.getInfo)
@@ -46,11 +54,19 @@ func New(m *core.Manager, info Info) http.Handler {
 	mux.HandleFunc("POST /api/threads/unprioritize", h.unprioritize)
 	mux.HandleFunc("POST /api/boards/remove", h.removeBoards)
 	mux.HandleFunc("POST /api/boards/clear", h.clearBoards)
+	mux.HandleFunc("POST /api/boards/filters", h.setBoardFilters)
+	mux.HandleFunc("GET /api/boards/filtered", h.boardFiltered)
+	mux.HandleFunc("GET /api/filters/matches", h.filterMatches)
 	mux.HandleFunc("POST /api/pause", h.pause)
 	mux.HandleFunc("GET /api/settings", h.getSettings)
 	mux.HandleFunc("POST /api/settings", h.setSettings)
 	mux.HandleFunc("GET /api/logs", h.logs)
 	mux.HandleFunc("GET /api/urls", h.urls)
+	mux.HandleFunc("GET /api/tokens", h.listTokens)
+	mux.HandleFunc("POST /api/tokens/create", h.createToken)
+	mux.HandleFunc("POST /api/tokens/revoke", h.revokeToken)
+	mux.HandleFunc("GET /api/ext/ping", h.requireToken(h.extPing))
+	mux.HandleFunc("POST /api/ext/add", h.requireToken(h.extAdd))
 	return noStore(mux)
 }
 
@@ -130,14 +146,17 @@ type itemError struct {
 }
 
 func (h *handler) removeThreads(w http.ResponseWriter, r *http.Request) {
-	var req keysRequest
+	var req struct {
+		Keys        []string `json:"keys"`
+		DeleteFiles bool     `json:"delete_files"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	var errs []itemError
 	for _, key := range req.Keys {
-		if err := h.m.RemoveThread(key); err != nil && !errors.Is(err, core.ErrNotFound) {
+		if err := h.m.RemoveThread(key, req.DeleteFiles); err != nil && !errors.Is(err, core.ErrNotFound) {
 			errs = append(errs, itemError{Key: key, Error: err.Error()})
 		}
 	}
@@ -165,8 +184,18 @@ func (h *handler) renameThread(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) clearThreads(w http.ResponseWriter, r *http.Request) {
-	h.m.ClearThreads()
-	writeJSON(w, http.StatusOK, map[string]any{})
+	var req struct {
+		DeleteFiles bool `json:"delete_files"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	errs := []itemError{}
+	for _, err := range h.m.ClearThreads(req.DeleteFiles) {
+		errs = append(errs, itemError{Error: err.Error()})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"errors": errs})
 }
 
 func (h *handler) prioritize(w http.ResponseWriter, r *http.Request) {
@@ -261,4 +290,103 @@ func (h *handler) urls(w http.ResponseWriter, r *http.Request) {
 		urls = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"urls": urls})
+}
+
+func (h *handler) listTokens(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": h.tokens.List()})
+}
+
+func (h *handler) createToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	tok, secret, err := h.tokens.Create(req.Name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"token": tok, "secret": secret})
+}
+
+func (h *handler) revokeToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.tokens.Revoke(req.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+// requireToken lets a request through only with a valid API token.
+func (h *handler) requireToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := h.tokens.Check(r.Header.Get(TokenHeader)); !ok {
+			writeError(w, http.StatusUnauthorized, errors.New("Invalid or revoked API token. Create a new one in SynoChan's settings."))
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (h *handler) extPing(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": h.info.Version})
+}
+
+func (h *handler) extAdd(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URLs []string `json:"urls"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.URLs) > 500 {
+		writeError(w, http.StatusBadRequest, errors.New("too many links in one request (500 at most)"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": h.m.AddURLs(strings.Join(req.URLs, "\n"))})
+}
+
+func (h *handler) setBoardFilters(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Key  string   `json:"key"`
+		Skip []string `json:"skip"`
+		Only []string `json:"only"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.m.SetBoardFilters(req.Key, config.BoardFilters{Skip: req.Skip, Only: req.Only}); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, core.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *handler) boardFiltered(w http.ResponseWriter, r *http.Request) {
+	list, err := h.m.BoardFiltered(r.URL.Query().Get("key"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"threads": list})
+}
+
+func (h *handler) filterMatches(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"threads": h.m.FilterMatches(r.URL.Query().Get("board"))})
 }

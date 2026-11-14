@@ -4,8 +4,10 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 
 	"synochan/internal/config"
 	"synochan/internal/fetch"
+	"synochan/internal/filter"
 	"synochan/internal/fourchan"
 	"synochan/internal/queue"
 )
@@ -30,6 +33,8 @@ type Options struct {
 	Logger    *slog.Logger
 	// TrackerSpacing overrides the one second between API requests (tests only).
 	TrackerSpacing time.Duration
+	// LogLevel is switched between info and debug by the "detailed logging" setting.
+	LogLevel *slog.LevelVar
 }
 
 // Manager owns the tracked threads and boards and the work queue.
@@ -41,6 +46,7 @@ type Manager struct {
 	endpoints fourchan.Endpoints
 	statePath string
 	log       *slog.Logger
+	logLevel  *slog.LevelVar
 	q         *queue.Queue
 
 	mu          sync.Mutex // Guards the lists below. Lock order: mu, then a tracker's own lock.
@@ -69,6 +75,7 @@ func New(opts Options) *Manager {
 		endpoints:   opts.Endpoints,
 		statePath:   opts.StatePath,
 		log:         opts.Logger,
+		logLevel:    opts.LogLevel,
 		threadByKey: make(map[string]*Thread),
 		boardByKey:  make(map[string]*Board),
 	}
@@ -88,6 +95,7 @@ func New(opts Options) *Manager {
 func (m *Manager) Start() error {
 	s := m.cfg.Get()
 	m.q.SetPaused(s.StartPaused)
+	m.applyLogLevel(s)
 
 	var loadErr error
 	if s.KeepLists && m.statePath != "" {
@@ -314,8 +322,19 @@ func (m *Manager) addTrackers(source queue.Item, items []queue.Item, onAdded fun
 // ErrNotFound is returned for unknown keys.
 var ErrNotFound = errors.New("not tracked")
 
-// RemoveThread stops tracking a thread. Its folder and files stay.
-func (m *Manager) RemoveThread(key string) error {
+func (m *Manager) applyLogLevel(s config.Settings) {
+	if m.logLevel == nil {
+		return
+	}
+	if s.DebugLogging {
+		m.logLevel.Set(slog.LevelDebug)
+	} else {
+		m.logLevel.Set(slog.LevelInfo)
+	}
+}
+
+// RemoveThread stops tracking a thread. With deleteFiles, its folder is deleted too; otherwise it stays.
+func (m *Manager) RemoveThread(key string, deleteFiles bool) error {
 	m.mu.Lock()
 	t := m.threadByKey[key]
 	m.mu.Unlock()
@@ -323,6 +342,40 @@ func (m *Manager) RemoveThread(key string) error {
 		return ErrNotFound
 	}
 	m.removeThread(t)
+	if deleteFiles {
+		return m.deleteThreadDir(t)
+	}
+	return nil
+}
+
+// deleteThreadDir deletes a removed thread's folder, once writes in flight have stopped. Only a folder
+// directly inside <root>/4chan/<board> is ever deleted.
+func (m *Manager) deleteThreadDir(t *Thread) error {
+	done := make(chan struct{})
+	go func() {
+		t.active.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		return fmt.Errorf("files of %s are still being written, folder not deleted", t.Key())
+	}
+	t.mu.Lock()
+	dir := t.dir
+	t.mu.Unlock()
+	if dir == "" {
+		return nil // Nothing was saved yet.
+	}
+	base := boardSaveDir(t.Root, t.Board)
+	rel, err := filepath.Rel(base, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || strings.ContainsRune(rel, filepath.Separator) {
+		return fmt.Errorf("refusing to delete %s: not a thread folder inside %s", dir, base)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("delete %s: %w", dir, err)
+	}
+	m.log.Info("deleted thread folder", "thread", t.Key(), "folder", dir)
 	return nil
 }
 
@@ -345,10 +398,12 @@ func (m *Manager) removeThread(t *Thread) {
 	m.saveLogged()
 }
 
-// ClearThreads removes all threads.
-func (m *Manager) ClearThreads() {
+// ClearThreads removes all threads, with deleteFiles also their folders. Folder errors are returned,
+// removal goes on regardless.
+func (m *Manager) ClearThreads(deleteFiles bool) []error {
 	m.mu.Lock()
-	for _, t := range m.threads {
+	all := m.threads
+	for _, t := range all {
 		t.cancel()
 	}
 	m.threads = nil
@@ -357,6 +412,15 @@ func (m *Manager) ClearThreads() {
 	m.q.Purge()
 	m.touch()
 	m.saveLogged()
+	var errs []error
+	if deleteFiles {
+		for _, t := range all {
+			if err := m.deleteThreadDir(t); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errs
 }
 
 // RemoveBoard stops tracking a board. Threads it added stay tracked.
@@ -546,6 +610,7 @@ func (m *Manager) UpdateSettings(s config.Settings) error {
 	if err := m.cfg.Set(s); err != nil {
 		return err
 	}
+	m.applyLogLevel(s)
 	m.q.Purge() // Thumbnails stop being wanted when they are turned off.
 	m.q.Wake()  // Download limits may have changed.
 	m.touch()
@@ -589,8 +654,11 @@ func (m *Manager) Snapshot() Snapshot {
 	for _, t := range threads {
 		s.Threads = append(s.Threads, t.view(interval))
 	}
+	tracked := m.trackedIDs()
 	for _, b := range boards {
-		s.Boards = append(s.Boards, b.view(interval))
+		v := b.view(interval)
+		v.Filtered = len(m.filteredOn(b, tracked))
+		s.Boards = append(s.Boards, v)
 	}
 	if info, err := os.Stat(savePath); err == nil && info.IsDir() {
 		s.SaveExists = true
@@ -613,6 +681,130 @@ func (m *Manager) URLs(kind string) []string {
 	} else {
 		for _, t := range m.threads {
 			out = append(out, t.URL())
+		}
+	}
+	return out
+}
+
+// boardRules returns the filters that apply to a board: the global ones plus the board's own.
+// Entries were validated when saved, so compile errors are only logged.
+func (m *Manager) boardRules(b *Board) filter.Rules {
+	s := m.cfg.Get()
+	var own config.BoardFilters
+	if b != nil {
+		b.mu.Lock()
+		own = b.filters
+		b.mu.Unlock()
+	}
+	rules, err := filter.NewRules(s.Filters.Skip, s.Filters.Only, own.Skip, own.Only, s.SkipSticky)
+	if err != nil {
+		m.log.Warn("invalid filter entries ignored", "err", err)
+	}
+	return rules
+}
+
+// SetBoardFilters sets a board's own filters. They add to the global skip list; a non-empty only list
+// replaces the global one for this board.
+func (m *Manager) SetBoardFilters(key string, f config.BoardFilters) error {
+	var err error
+	if f.Skip, err = filter.CleanList(f.Skip); err != nil {
+		return fmt.Errorf("skip filter: %w", err)
+	}
+	if f.Only, err = filter.CleanList(f.Only); err != nil {
+		return fmt.Errorf("only filter: %w", err)
+	}
+	m.mu.Lock()
+	b := m.boardByKey[key]
+	m.mu.Unlock()
+	if b == nil {
+		return ErrNotFound
+	}
+	b.mu.Lock()
+	b.filters = f
+	b.mu.Unlock()
+	m.touch()
+	m.saveLogged()
+	return nil
+}
+
+func (m *Manager) trackedIDs() map[string]bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make(map[string]bool, len(m.threads))
+	for k := range m.threadByKey {
+		ids[k] = true
+	}
+	return ids
+}
+
+// filteredOn lists live threads of a board's last catalog that its filters keep out and that are not tracked.
+func (m *Manager) filteredOn(b *Board, tracked map[string]bool) []FilteredThread {
+	rules := m.boardRules(b)
+	b.mu.Lock()
+	catalog := b.catalog
+	b.mu.Unlock()
+	out := []FilteredThread{}
+	for _, e := range catalog {
+		if tracked[threadKey(b.Site, b.Code, e.ID)] {
+			continue
+		}
+		if v := rules.Check(e.FilterS, e.Text, e.Sticky); !v.Allowed {
+			subject := e.Subject
+			if subject == "" {
+				subject = NoSubject
+			}
+			out = append(out, FilteredThread{ID: e.ID, Subject: subject, Reason: v.Reason, URL: fourchan.ThreadURL(b.Code, e.ID)})
+		}
+	}
+	return out
+}
+
+// BoardFiltered lists the live threads a board's filters keep out.
+func (m *Manager) BoardFiltered(key string) ([]FilteredThread, error) {
+	m.mu.Lock()
+	b := m.boardByKey[key]
+	m.mu.Unlock()
+	if b == nil {
+		return nil, ErrNotFound
+	}
+	return m.filteredOn(b, m.trackedIDs()), nil
+}
+
+// FilterMatch is a tracked thread that the current filters would have kept out.
+type FilterMatch struct {
+	Key     string `json:"key"`
+	Subject string `json:"subject"`
+	Reason  string `json:"reason"`
+}
+
+// FilterMatches lists tracked threads, added by a board (boardKey, or any board when empty), that the
+// current filters would keep out. Threads the user added are never listed.
+func (m *Manager) FilterMatches(boardKey string) []FilterMatch {
+	m.mu.Lock()
+	threads := append([]*Thread(nil), m.threads...)
+	boards := make(map[string]*Board, len(m.boardByKey))
+	for k, b := range m.boardByKey {
+		boards[k] = b
+	}
+	m.mu.Unlock()
+
+	rulesFor := map[string]filter.Rules{}
+	out := []FilterMatch{}
+	for _, t := range threads {
+		if t.FromBoard == "" || (boardKey != "" && t.FromBoard != boardKey) {
+			continue
+		}
+		rules, ok := rulesFor[t.FromBoard]
+		if !ok {
+			rules = m.boardRules(boards[t.FromBoard]) // A removed board leaves the global filters.
+			rulesFor[t.FromBoard] = rules
+		}
+		t.mu.Lock()
+		subject, text, display := t.matchSubject, t.matchText, t.displaySubjectLocked()
+		t.mu.Unlock()
+		// Stickies are judged at catalog time only; a tracked thread's sticky state is not known.
+		if v := rules.Check(subject, text, false); !v.Allowed {
+			out = append(out, FilterMatch{Key: t.Key(), Subject: display, Reason: v.Reason})
 		}
 	}
 	return out

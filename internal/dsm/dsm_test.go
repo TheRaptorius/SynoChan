@@ -138,3 +138,39 @@ func TestFrontendDaemonDown(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 }
+
+func TestFrontendExtensionTokenPath(t *testing.T) {
+	var seen *http.Request
+	sock := startDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r
+		w.Write([]byte(`{}`))
+	}))
+	denyAll := func(*http.Request) (string, error) { return "", ErrUnauthenticated }
+	f := NewFrontend(sock, denyAll)
+
+	// ext/ with a token reaches the daemon without a DSM session, token included.
+	r := httptest.NewRequest("POST", "/x?path=ext/add", strings.NewReader(`{}`))
+	r.Header.Set(server.TokenHeader, "sc_abc")
+	w := httptest.NewRecorder()
+	f.ServeHTTP(w, r)
+	if w.Code != 200 || seen == nil || seen.URL.Path != "/api/ext/add" || seen.Header.Get(server.TokenHeader) != "sc_abc" || seen.Header.Get(server.UserHeader) != "" {
+		t.Fatalf("ext call: %d %+v", w.Code, seen)
+	}
+
+	// ext/ without a token is refused before reaching the daemon.
+	seen = nil
+	w = httptest.NewRecorder()
+	f.ServeHTTP(w, httptest.NewRequest("POST", "/x?path=ext/add", nil))
+	if w.Code != 401 || seen != nil {
+		t.Fatalf("ext without token: %d", w.Code)
+	}
+
+	// A token does not open any other route.
+	r = httptest.NewRequest("GET", "/x?path=state", nil)
+	r.Header.Set(server.TokenHeader, "sc_abc")
+	w = httptest.NewRecorder()
+	f.ServeHTTP(w, r)
+	if w.Code != 401 || seen != nil {
+		t.Fatalf("token on a session route: %d", w.Code)
+	}
+}

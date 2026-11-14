@@ -91,6 +91,8 @@ func (u *uploadItem) Process(ctx context.Context) (queue.Result, error) {
 	if !u.ShouldProcess() {
 		return queue.Result{Remove: true}, nil
 	}
+	u.t.active.Add(1)
+	defer u.t.active.Done()
 	dir, err := u.t.ensureDir()
 	if err != nil {
 		u.t.noteError(err)
@@ -128,6 +130,8 @@ func (th *thumbnailItem) Process(ctx context.Context) (queue.Result, error) {
 	if !th.ShouldProcess() {
 		return queue.Result{Remove: true}, nil
 	}
+	th.t.active.Add(1)
+	defer th.t.active.Done()
 	threadDir, err := th.t.ensureDir()
 	if err != nil {
 		return queue.Result{}, err

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"synochan/internal/config"
 	"synochan/internal/fetch"
 	"synochan/internal/fourchan"
 	"synochan/internal/queue"
@@ -31,6 +32,25 @@ type Board struct {
 	lastAttempt      time.Time
 	lastCheck        time.Time
 	lastError        string
+	filters          config.BoardFilters // The board's own filters, on top of the global ones.
+	catalog          []catalogEntry      // Threads of the last catalog read, for listing filtered ones.
+}
+
+// catalogEntry is what filters need to know about a thread on a board.
+type catalogEntry struct {
+	ID      int64
+	Subject string // As shown in the UI.
+	FilterS string // Subject and name, searched by filters.
+	Text    string // Opening post text, searched by filters.
+	Sticky  bool
+}
+
+// FilteredThread is a thread on a board that the board's filters keep out.
+type FilteredThread struct {
+	ID      int64  `json:"id"`
+	Subject string `json:"subject"`
+	Reason  string `json:"reason"`
+	URL     string `json:"url"`
 }
 
 func (m *Manager) newBoard(code, saveTo string) *Board {
@@ -124,7 +144,9 @@ func (b *Board) Process(ctx context.Context) (queue.Result, error) {
 		return queue.Result{}, err
 	}
 
+	rules := b.m.boardRules(b)
 	total := 0
+	var catalog []catalogEntry
 	var newThreads []queue.Item
 	var greatestNew int64
 	saveRoot := b.m.cfg.Get().SavePath
@@ -132,28 +154,42 @@ func (b *Board) Process(ctx context.Context) (queue.Result, error) {
 		for i := range page.Threads {
 			p := &page.Threads[i]
 			total++
+			filterSubject, text := fourchan.FilterText(p)
+			entry := catalogEntry{ID: p.No, Subject: fourchan.ExtractSubject(p), FilterS: filterSubject, Text: text, Sticky: p.Sticky != 0}
+			catalog = append(catalog, entry)
 			if p.No <= greatest {
 				continue
 			}
+			// Filtered threads count as seen too, so they are judged (and logged) once.
+			greatestNew = max(greatestNew, p.No)
+			if v := rules.Check(entry.FilterS, entry.Text, entry.Sticky); !v.Allowed {
+				b.m.log.Info("thread filtered", "board", b.Code, "thread", p.No, "reason", v.Reason, "subject", entry.Subject)
+				continue
+			}
 			t := b.m.newThread(b.Code, p.No, saveRoot)
-			if subject := fourchan.ExtractSubject(p); subject != "" {
-				t.subject, t.subjectSet = subject, true
+			t.FromBoard = b.Key()
+			t.matchSubject, t.matchText = entry.FilterS, entry.Text
+			if entry.Subject != "" {
+				t.subject, t.subjectSet = entry.Subject, true
 			}
 			// The catalog does not count the opening post's file.
 			t.fileCount, t.fileCountKnown = p.Images+1, true
 			newThreads = append(newThreads, t)
-			greatestNew = max(greatestNew, p.No)
 		}
 	}
+
+	b.mu.Lock()
+	b.catalog = catalog
+	b.threadCount = total
+	if len(newThreads) == 0 {
+		b.greatestThreadID = max(b.greatestThreadID, greatestNew)
+	}
+	b.mu.Unlock()
 
 	if len(newThreads) == 0 {
 		finish(res.LastModified, total)
 		return queue.Result{}, nil
 	}
-
-	b.mu.Lock()
-	b.threadCount = total
-	b.mu.Unlock()
 
 	lastModified := res.LastModified
 	return queue.Result{
@@ -183,6 +219,9 @@ type BoardView struct {
 	SharePath    string    `json:"share_path,omitempty"`
 	FolderExists bool      `json:"folder_exists"`
 	AddedAt      time.Time `json:"added_at"`
+	// Filters are the board's own filters; Filtered counts live threads the filters keep out.
+	Filters  config.BoardFilters `json:"filters"`
+	Filtered int                 `json:"filtered"`
 }
 
 func (b *Board) view(interval time.Duration) BoardView {
@@ -199,6 +238,7 @@ func (b *Board) view(interval time.Duration) BoardView {
 		SaveTo:      b.SaveTo,
 		SharePath:   SharePath(b.SaveTo),
 		AddedAt:     b.AddedAt,
+		Filters:     b.filters,
 	}
 	if info, err := os.Stat(b.SaveTo); err == nil && info.IsDir() {
 		v.FolderExists = true
