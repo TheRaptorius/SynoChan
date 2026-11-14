@@ -70,8 +70,8 @@ jobs:
           case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
           # Copies with fixed names, so ".../releases/latest/download/<name>" always gets the newest release.
           cp dist/synochan-*-noarch.spk dist/synochan.spk
-          cp dist/synochan-extension-chrome-*.zip dist/synochan-extension-chrome.zip
-          gh release create "$GITHUB_REF_NAME" dist/*.spk dist/synochan-extension-chrome*.zip --generate-notes $prerelease
+          cp dist/synochan-extension-chromium-*.zip dist/synochan-extension-chromium.zip
+          gh release create "$GITHUB_REF_NAME" dist/*.spk dist/synochan-extension-chromium*.zip --generate-notes $prerelease
 
       - name: Build package source site
         if: github.ref_type == 'tag'

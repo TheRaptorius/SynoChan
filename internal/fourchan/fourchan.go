@@ -57,6 +57,10 @@ func BoardURL(board string) string {
 var (
 	threadRe = regexp.MustCompile(`boards\.(?:4chan|4channel)\.org/([a-zA-Z0-9]+)/thread/(\d+)`)
 	boardRe  = regexp.MustCompile(`boards\.(?:4chan|4channel)\.org/([a-zA-Z0-9]+)/*(?:catalog/*)?$`)
+	// Short forms without the host: "/g/thread/123", and boards as "/g/", "/g", "g/" or 4chan's own ">>>/g/".
+	// A slash is required, so a stray word is not taken for a board.
+	shortThreadRe = regexp.MustCompile(`^/?([a-zA-Z0-9]+)/thread/(\d+)`)
+	shortBoardRe  = regexp.MustCompile(`^(?:>>>)?/([a-zA-Z0-9]+)/?(?:catalog/?)?$|^([a-zA-Z0-9]+)/(?:catalog/?)?$`)
 )
 
 // ThreadRef identifies a thread parsed from a URL.
@@ -70,6 +74,9 @@ type ThreadRef struct {
 func ParseThreadURL(raw string) (ThreadRef, bool) {
 	raw = PrepareURL(raw)
 	m := threadRe.FindStringSubmatch(raw)
+	if m == nil {
+		m = shortThreadRe.FindStringSubmatch(raw)
+	}
 	if m == nil {
 		return ThreadRef{}, false
 	}
@@ -97,11 +104,16 @@ func ParseBoardURL(raw string) (string, bool) {
 	if i := strings.Index(raw, "?"); i >= 0 {
 		raw = raw[:i]
 	}
-	m := boardRe.FindStringSubmatch(raw)
-	if m == nil {
-		return "", false
+	if m := boardRe.FindStringSubmatch(raw); m != nil {
+		return m[1], true
 	}
-	return m[1], true
+	if m := shortBoardRe.FindStringSubmatch(raw); m != nil {
+		if m[1] != "" {
+			return m[1], true
+		}
+		return m[2], true
+	}
+	return "", false
 }
 
 // PrepareURL trims whitespace and drops the reply anchor, e.g. "…/thread/16245377#p16245377" becomes "…/thread/16245377".

@@ -30,7 +30,7 @@
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "commands": {
     "add-current-page": {
-      "suggested_key": { "default": "Alt+Shift+S" },
+      "suggested_key": { "default": "Ctrl+Shift+Y", "mac": "Command+Shift+Y" },
       "description": "Add the current thread or board to SynoChan"
     }
   }

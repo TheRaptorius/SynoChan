@@ -23,6 +23,8 @@ func TestParseThreadURL(t *testing.T) {
 		{"http://boards.4chan.org/r9k/thread/77?subject=My_Nice_Thread", true, "r9k", 77, "My Nice Thread"},
 		{"https://boards.4chan.org/wsg/thread/5?a=1&s=Bad%2FName", true, "wsg", 5, "BadName"},
 		{"https://boards.4chan.org/gif/", false, "", 0, ""},
+		{"/g/thread/123456", true, "g", 123456, ""},
+		{"g/thread/42#p43", true, "g", 42, ""},
 		{"https://example.com/g/thread/1", false, "", 0, ""},
 		{"", false, "", 0, ""},
 	}
@@ -45,6 +47,15 @@ func TestParseBoardURL(t *testing.T) {
 		"https://boards.4chan.org/gif/thread/1": "",
 		"https://boards.4chan.org/":             "",
 		"https://example.org/g/":                "",
+		"/g/":                                   "g",
+		"/g":                                    "g",
+		"g/":                                    "g",
+		">>>/wg/":                               "wg",
+		"/vg/catalog":                           "vg",
+		"g":                                     "",
+		"/g/thread/1":                           "",
+		"//":                                    "",
+		"/g/x":                                  "",
 	}
 	for in, want := range cases {
 		got, ok := ParseBoardURL(in)
