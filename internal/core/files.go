@@ -7,14 +7,26 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 
 	"synochan/internal/config"
 	"synochan/internal/fourchan"
 )
 
-func threadSaveDir(root, board string, id int64) string {
-	return filepath.Join(root, fourchan.SiteName, board, strconv.FormatInt(id, 10))
+// threadDir is a thread's folder: <root>/4chan/<board>/<name>, the name by the folder name setting.
+// Without a subject the folder is named by the number alone.
+func threadDir(root, board string, id int64, subject string, format config.FolderNameFormat) string {
+	number := strconv.FormatInt(id, 10)
+	subject = fourchan.SanitiseSubject(subject)
+	name := number
+	if subject != "" {
+		switch format {
+		case config.FolderNumberSubject:
+			name = number + " - " + subject
+		case config.FolderSubjectNumber:
+			name = subject + " - " + number
+		}
+	}
+	return filepath.Join(root, fourchan.SiteName, board, fourchan.ClampName(name))
 }
 
 func boardSaveDir(root, board string) string {
@@ -32,37 +44,19 @@ func SharePath(p string) string {
 	return ""
 }
 
-// renamedThreadDir returns the folder name a removed thread is moved to, by the configured format.
-func renamedThreadDir(saveTo, subject string, id int64, format config.FolderNameFormat) string {
-	subject = fourchan.SanitiseSubject(subject)
-	parent := filepath.Dir(saveTo)
-	var name string
-	if format == config.FolderSubjectID {
-		name = fmt.Sprintf("%s - %d", subject, id)
-	} else {
-		name = fmt.Sprintf("%s - %s", filepath.Base(saveTo), subject)
-	}
-	return filepath.Join(parent, fourchan.ClampName(strings.TrimSpace(name)))
-}
-
-// moveThreadDir renames a thread folder to include its subject. An existing destination gets " (1)", " (2)", … appended.
-// Returns the new path, or "" when there was nothing to move.
-func moveThreadDir(saveTo, subject string, id int64, format config.FolderNameFormat) (string, error) {
-	if _, err := os.Stat(saveTo); errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	dest := renamedThreadDir(saveTo, subject, id, format)
-	candidate := dest
+// renameDir moves a folder to want. If want is taken, " (1)", " (2)", … is appended. Returns the new path.
+func renameDir(from, want string) (string, error) {
+	candidate := want
 	for n := 1; ; n++ {
 		if _, err := os.Lstat(candidate); errors.Is(err, os.ErrNotExist) {
 			break
 		}
 		if n > 1000 {
-			return "", fmt.Errorf("no free folder name for %s", dest)
+			return "", fmt.Errorf("no free folder name for %s", want)
 		}
-		candidate = fmt.Sprintf("%s (%d)", dest, n)
+		candidate = fmt.Sprintf("%s (%d)", want, n)
 	}
-	if err := os.Rename(saveTo, candidate); err != nil {
+	if err := os.Rename(from, candidate); err != nil {
 		return "", err
 	}
 	return candidate, nil

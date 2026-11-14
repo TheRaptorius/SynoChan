@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -15,20 +16,28 @@ import (
 
 type fakeItem struct {
 	name     string
-	prio     Priority
+	order    Order
 	asset    bool
 	ctx      context.Context
 	cancel   context.CancelFunc
 	readyAt  atomic.Int64 // Unix nanoseconds, 0 = any time.
 	process  func(ctx context.Context) (Result, error)
+	onGiveUp func()
 	runs     atomic.Int32
 	mu       sync.Mutex
 	runTimes []time.Time
 }
 
-func newFake(name string, prio Priority, fn func(ctx context.Context) (Result, error)) *fakeItem {
+func newFake(name string, lane Lane, fn func(ctx context.Context) (Result, error)) *fakeItem {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &fakeItem{name: name, prio: prio, ctx: ctx, cancel: cancel, process: fn}
+	return &fakeItem{name: name, order: Order{Rank: NoRank, Lane: lane}, ctx: ctx, cancel: cancel, process: fn}
+}
+
+func newAsset(name string, rank int, fn func(ctx context.Context) (Result, error)) *fakeItem {
+	f := newFake(name, Default, fn)
+	f.asset = true
+	f.order.Rank = rank
+	return f
 }
 
 func (f *fakeItem) Context() context.Context { return f.ctx }
@@ -39,9 +48,9 @@ func (f *fakeItem) ReadyAt() time.Time {
 	}
 	return time.Time{}
 }
-func (f *fakeItem) Priority() Priority { return f.prio }
-func (f *fakeItem) IsAsset() bool      { return f.asset }
-func (f *fakeItem) String() string     { return f.name }
+func (f *fakeItem) Order() Order   { return f.order }
+func (f *fakeItem) IsAsset() bool  { return f.asset }
+func (f *fakeItem) String() string { return f.name }
 func (f *fakeItem) Process(ctx context.Context) (Result, error) {
 	f.runs.Add(1)
 	f.mu.Lock()
@@ -52,10 +61,16 @@ func (f *fakeItem) Process(ctx context.Context) (Result, error) {
 
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-func newQueue(maxConcurrent int, oneRPS bool) *Queue {
+// newQueue makes a queue without the one second tracker spacing unless spaced is set, to keep tests fast.
+func newQueue(maxDownloads int, spaced bool) *Queue {
+	spacing := time.Millisecond
+	if spaced {
+		spacing = time.Second
+	}
 	return New(Options{
-		Limits: func() (int, bool) { return maxConcurrent, oneRPS },
-		Logger: quietLogger(),
+		Limits:         func() Limits { return Limits{MaxDownloads: maxDownloads, SpaceDownloads: spaced} },
+		TrackerSpacing: spacing,
+		Logger:         quietLogger(),
 	})
 }
 
@@ -81,7 +96,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-func TestPriorityOrderAndDistinct(t *testing.T) {
+func TestOrderTrackersThenRanksThenLanes(t *testing.T) {
 	q := newQueue(1, false)
 	var mu sync.Mutex
 	var order []string
@@ -93,21 +108,79 @@ func TestPriorityOrderAndDistinct(t *testing.T) {
 			return Result{Remove: true}, nil
 		}
 	}
-	low := newFake("low", Low, record("low"))
-	def := newFake("default", Default, record("default"))
-	high := newFake("high", High, record("high"))
-	q.Enqueue(low)
-	q.Enqueue(def)
-	q.Enqueue(def) // Duplicate is ignored.
-	q.Enqueue(high)
-	if s := q.Status(); s.Queued != 3 {
-		t.Fatalf("queued = %d, want 3", s.Queued)
+	plain := newAsset("asset", NoRank, record("asset"))
+	thumb := newAsset("thumb", NoRank, record("thumb"))
+	thumb.order.Lane = Low
+	second := newAsset("rank2", 2, record("rank2"))
+	first := newAsset("rank1", 1, record("rank1"))
+	tracker := newFake("tracker", Default, record("tracker"))
+	newThread := newFake("new thread", High, record("new thread"))
+	for _, it := range []*fakeItem{thumb, plain, second, first, tracker, newThread} {
+		q.Enqueue(it)
+	}
+	q.Enqueue(plain) // Duplicate is ignored.
+	if s := q.Status(); s.Queued != 6 {
+		t.Fatalf("queued = %d, want 6", s.Queued)
 	}
 	run(t, q)
-	waitFor(t, "all processed", func() bool { mu.Lock(); defer mu.Unlock(); return len(order) == 3 })
-	if order[0] != "high" || order[1] != "default" || order[2] != "low" {
+	waitFor(t, "all processed", func() bool { mu.Lock(); defer mu.Unlock(); return len(order) == 6 })
+	// Trackers run in their own slot, so they lead; ranked assets come before the rest, thumbnails last.
+	want := []string{"new thread", "tracker", "rank1", "rank2", "asset", "thumb"}
+	trackers, assets := []string{}, []string{}
+	for _, n := range order {
+		if n == "tracker" || n == "new thread" {
+			trackers = append(trackers, n)
+		} else {
+			assets = append(assets, n)
+		}
+	}
+	if fmt.Sprint(trackers) != fmt.Sprint(want[:2]) || fmt.Sprint(assets) != fmt.Sprint(want[2:]) {
 		t.Fatalf("order = %v", order)
 	}
+}
+
+func TestRankChangeWhileQueued(t *testing.T) {
+	q := newQueue(1, false)
+	var mu sync.Mutex
+	var order []string
+	record := func(name string) func(context.Context) (Result, error) {
+		return func(context.Context) (Result, error) {
+			mu.Lock()
+			order = append(order, name)
+			mu.Unlock()
+			return Result{Remove: true}, nil
+		}
+	}
+	a := newAsset("a", NoRank, record("a"))
+	b := newAsset("b", NoRank, record("b"))
+	q.Enqueue(a)
+	q.Enqueue(b)
+	b.order.Rank = 1 // Prioritised after queueing; read at pick time.
+	run(t, q)
+	waitFor(t, "both", func() bool { mu.Lock(); defer mu.Unlock(); return len(order) == 2 })
+	if order[0] != "b" {
+		t.Fatalf("order = %v", order)
+	}
+}
+
+func TestTrackersNotBlockedByDownloads(t *testing.T) {
+	q := newQueue(1, false)
+	release := make(chan struct{})
+	slow := newAsset("slow download", NoRank, func(context.Context) (Result, error) {
+		<-release
+		return Result{Remove: true}, nil
+	})
+	var checked atomic.Bool
+	tracker := newFake("check", Default, func(context.Context) (Result, error) {
+		checked.Store(true)
+		return Result{Remove: true}, nil
+	})
+	q.Enqueue(slow)
+	run(t, q)
+	waitFor(t, "download running", func() bool { return slow.runs.Load() == 1 })
+	q.Enqueue(tracker)
+	waitFor(t, "check while the download slot is busy", checked.Load)
+	close(release)
 }
 
 func TestConcurrencyLimit(t *testing.T) {
@@ -115,7 +188,7 @@ func TestConcurrencyLimit(t *testing.T) {
 	var running, peak atomic.Int32
 	release := make(chan struct{})
 	for i := 0; i < 6; i++ {
-		q.Enqueue(newFake("item", Default, func(ctx context.Context) (Result, error) {
+		q.Enqueue(newAsset("item", NoRank, func(ctx context.Context) (Result, error) {
 			n := running.Add(1)
 			for {
 				p := peak.Load()
@@ -138,20 +211,32 @@ func TestConcurrencyLimit(t *testing.T) {
 	waitFor(t, "drained", func() bool { s := q.Status(); return s.Queued == 0 && s.Active == 0 })
 }
 
-func TestOneRequestPerSecondSpacing(t *testing.T) {
+func TestTrackersAndSpacedDownloadsOnePerSecond(t *testing.T) {
 	q := newQueue(4, true)
 	var times []time.Time
 	var mu sync.Mutex
+	var assetTimes []time.Time
 	for i := 0; i < 3; i++ {
-		q.Enqueue(newFake("item", Default, func(context.Context) (Result, error) {
+		q.Enqueue(newFake("tracker", Default, func(context.Context) (Result, error) {
 			mu.Lock()
 			times = append(times, time.Now())
 			mu.Unlock()
 			return Result{Remove: true}, nil
 		}))
+		q.Enqueue(newAsset("asset", NoRank, func(context.Context) (Result, error) {
+			mu.Lock()
+			assetTimes = append(assetTimes, time.Now())
+			mu.Unlock()
+			return Result{Remove: true}, nil
+		}))
 	}
 	run(t, q)
-	waitFor(t, "three runs", func() bool { mu.Lock(); defer mu.Unlock(); return len(times) == 3 })
+	waitFor(t, "all runs", func() bool { mu.Lock(); defer mu.Unlock(); return len(times) == 3 && len(assetTimes) == 3 })
+	for i := 1; i < 3; i++ {
+		if gap := assetTimes[i].Sub(assetTimes[i-1]); gap < 950*time.Millisecond {
+			t.Fatalf("download gap %v too short", gap)
+		}
+	}
 	for i := 1; i < 3; i++ {
 		if gap := times[i].Sub(times[i-1]); gap < 950*time.Millisecond {
 			t.Fatalf("gap %v too short", gap)
@@ -179,9 +264,10 @@ func TestRequeueAndReadyAt(t *testing.T) {
 
 func TestAssetGivesUpAfterRepeatedFailures(t *testing.T) {
 	q := newQueue(1, false)
-	asset := newFake("asset", Default, func(context.Context) (Result, error) { return Result{}, errors.New("boom") })
-	asset.asset = true
+	asset := newAsset("asset", NoRank, func(context.Context) (Result, error) { return Result{}, errors.New("boom") })
 	q.Enqueue(asset)
+	var gaveUp atomic.Bool
+	asset.onGiveUp = func() { gaveUp.Store(true) }
 
 	// Shrink waiting: pretend each retry is due immediately by clearing retry times as they appear.
 	run(t, q)
@@ -200,6 +286,7 @@ func TestAssetGivesUpAfterRepeatedFailures(t *testing.T) {
 	if n := asset.runs.Load(); n != maxAssetAttempts {
 		t.Fatalf("runs = %d, want %d", n, maxAssetAttempts)
 	}
+	waitFor(t, "give up notification", gaveUp.Load)
 }
 
 func TestTrackerRetryBackoffGrows(t *testing.T) {
@@ -298,7 +385,8 @@ func TestNewItemsAndTrackersCallback(t *testing.T) {
 	var added []Item
 	var onAddedRan atomic.Bool
 	q := New(Options{
-		Limits: func() (int, bool) { return 1, false },
+		Limits:         func() Limits { return Limits{MaxDownloads: 1} },
+		TrackerSpacing: time.Millisecond,
 		AddTrackers: func(source Item, trackers []Item, onAdded func()) bool {
 			added = append(added, trackers...)
 			onAdded()
@@ -316,5 +404,11 @@ func TestNewItemsAndTrackersCallback(t *testing.T) {
 	waitFor(t, "child ran", func() bool { return child.runs.Load() == 1 })
 	if len(added) != 1 || added[0] != tracker || !onAddedRan.Load() {
 		t.Fatalf("callback: added=%v onAdded=%v", added, onAddedRan.Load())
+	}
+}
+
+func (f *fakeItem) GaveUp() {
+	if f.onGiveUp != nil {
+		f.onGiveUp()
 	}
 }

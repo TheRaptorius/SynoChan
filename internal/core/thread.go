@@ -19,47 +19,54 @@ import (
 // NoSubject is shown for threads without any usable subject.
 const NoSubject = "No Subject"
 
-// Thread tracks one thread: it is rescraped periodically and queues downloads for new files.
+// apiSpacing keeps two requests of one check a second apart, as the image board's API rules require.
+const apiSpacing = time.Second
+
+// Thread tracks one thread: it is rechecked periodically and queues downloads for new files.
 type Thread struct {
 	m       *Manager
 	Site    string
 	Board   string
 	ID      int64
-	SaveTo  string
+	Root    string // Save folder at the time the thread was added; its folder is created below it.
 	AddedAt time.Time
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	active sync.WaitGroup // Downloads of this thread in flight.
 
 	mu             sync.Mutex
+	dir            string // The thread's folder once created, "" before the first file.
 	subject        string
 	subjectSet     bool // Subject known (scraped, from the catalog or set by the user), possibly empty.
 	fileCount      int
 	fileCountKnown bool
-	lastModified   time.Time // Server time of the last successful scrape, sent as If-Modified-Since.
-	lastAttempt    time.Time // Local time the last scrape started, for spacing scrapes out.
-	lastCheck      time.Time // Local time of the last successful scrape, for display.
+	lastModified   time.Time // Server time of the last successful check, sent as If-Modified-Since.
+	lastAttempt    time.Time // Local time the last check started, for spacing checks out.
+	lastCheck      time.Time // Local time of the last successful check, for display.
 	lastError      string
 	seen           map[AssetID]struct{} // Assets that were queued and need no further processing.
 	saved          map[AssetID]struct{} // Assets that were saved to disk.
-	priority       queue.Priority
+	failed         map[AssetID]struct{} // Assets the queue gave up on.
+	lane           queue.Lane
+	prio           int  // User priority: 1 is downloaded first, 0 means none.
+	prioChecked    bool // A check finished since the thread was prioritised.
 }
 
-func (m *Manager) newThread(board string, id int64, saveTo string) *Thread {
+func (m *Manager) newThread(board string, id int64, root string) *Thread {
 	ctx, cancel := context.WithCancel(m.ctx)
 	return &Thread{
-		m:        m,
-		Site:     fourchan.SiteName,
-		Board:    board,
-		ID:       id,
-		SaveTo:   saveTo,
-		AddedAt:  time.Now(),
-		ctx:      ctx,
-		cancel:   cancel,
-		seen:     make(map[AssetID]struct{}),
-		saved:    make(map[AssetID]struct{}),
-		priority: queue.Default,
+		m:       m,
+		Site:    fourchan.SiteName,
+		Board:   board,
+		ID:      id,
+		Root:    root,
+		AddedAt: time.Now(),
+		ctx:     ctx,
+		cancel:  cancel,
+		seen:    make(map[AssetID]struct{}),
+		saved:   make(map[AssetID]struct{}),
+		failed:  make(map[AssetID]struct{}),
+		lane:    queue.Default,
 	}
 }
 
@@ -82,11 +89,24 @@ func (t *Thread) ShouldProcess() bool { return t.ctx.Err() == nil }
 // IsAsset implements queue.Item.
 func (t *Thread) IsAsset() bool { return false }
 
-// Priority implements queue.Item. New threads go first so their subject and file count show up quickly.
-func (t *Thread) Priority() queue.Priority {
+// Order implements queue.Item. Prioritised threads are checked first, new threads before rechecks.
+func (t *Thread) Order() queue.Order {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.priority
+	return queue.Order{Rank: t.rankLocked(), Lane: t.lane}
+}
+
+func (t *Thread) rankLocked() int {
+	if t.prio > 0 {
+		return t.prio
+	}
+	return queue.NoRank
+}
+
+func (t *Thread) assetOrder(lane queue.Lane) queue.Order {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return queue.Order{Rank: t.rankLocked(), Lane: lane}
 }
 
 // ReadyAt implements queue.Item.
@@ -100,13 +120,6 @@ func (t *Thread) ReadyAt() time.Time {
 	return last.Add(time.Duration(t.m.cfg.Get().MinSecondsBetweenScrapes) * time.Second)
 }
 
-// DisplaySubject is "Loading…" until anything is known, then the subject or NoSubject.
-func (t *Thread) DisplaySubject() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.displaySubjectLocked()
-}
-
 func (t *Thread) displaySubjectLocked() string {
 	if !t.subjectSet && !t.fileCountKnown {
 		return "Loading…"
@@ -117,13 +130,48 @@ func (t *Thread) displaySubjectLocked() string {
 	return t.subject
 }
 
-// SetSubject renames the thread.
-func (t *Thread) SetSubject(subject string) {
+// plannedDirLocked is the folder the thread is (or will be) saved in, by the folder name setting.
+func (t *Thread) plannedDirLocked() string {
+	return threadDir(t.Root, t.Board, t.ID, t.subject, t.m.cfg.Get().FolderName)
+}
+
+// ensureDir creates the thread's folder on first use and returns it.
+func (t *Thread) ensureDir() (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.dir != "" {
+		if _, err := os.Stat(t.dir); err == nil {
+			return t.dir, nil
+		}
+	}
+	dir := t.plannedDirLocked()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", friendlyPermissionError(dir, err)
+	}
+	t.dir = dir
+	return dir, nil
+}
+
+// SetSubject renames the thread and, when its folder name includes the subject, its folder.
+func (t *Thread) SetSubject(subject string) error {
 	t.mu.Lock()
 	t.subject = fourchan.SanitiseSubject(subject)
 	t.subjectSet = true
+	var renameErr error
+	if t.dir != "" {
+		if want := t.plannedDirLocked(); want != t.dir {
+			// A download writing into the old folder fails and is retried into the new one.
+			newDir, err := renameDir(t.dir, want)
+			if err != nil {
+				renameErr = fmt.Errorf("thread renamed, but its folder could not be renamed: %w", err)
+			} else {
+				t.dir = newDir
+			}
+		}
+	}
 	t.mu.Unlock()
 	t.m.touch()
+	return renameErr
 }
 
 func (t *Thread) noteError(err error) {
@@ -141,9 +189,34 @@ func (t *Thread) markSaved(id AssetID) {
 	t.saved[id] = struct{}{}
 	t.mu.Unlock()
 	t.m.touch()
+	t.m.checkPriorityDone(t)
 }
 
-// Process implements queue.Item: scrapes the thread and queues downloads for files not seen before.
+func (t *Thread) markFailed(id AssetID) {
+	t.mu.Lock()
+	t.failed[id] = struct{}{}
+	t.mu.Unlock()
+	t.m.touch()
+	t.m.checkPriorityDone(t)
+}
+
+// pendingLocked counts uploads that were found but are neither saved nor given up on.
+func (t *Thread) pendingLocked() int {
+	pending := 0
+	for id := range t.seen {
+		if id.Type != AssetUpload {
+			continue
+		}
+		_, saved := t.saved[id]
+		_, failed := t.failed[id]
+		if !saved && !failed {
+			pending++
+		}
+	}
+	return pending
+}
+
+// Process implements queue.Item: checks the thread and queues downloads for files not seen before.
 func (t *Thread) Process(ctx context.Context) (queue.Result, error) {
 	if !t.ShouldProcess() {
 		return queue.Result{Remove: true}, nil
@@ -162,7 +235,7 @@ func (t *Thread) Process(ctx context.Context) (queue.Result, error) {
 	if err != nil {
 		if fetch.IsGone(err) {
 			t.m.log.Info("thread is gone, removing", "thread", t.Key())
-			go t.m.removeThread(t, false)
+			go t.m.removeThread(t)
 			return queue.Result{Remove: true}, nil
 		}
 		t.noteError(err)
@@ -174,8 +247,10 @@ func (t *Thread) Process(ctx context.Context) (queue.Result, error) {
 		t.lastModified = res.LastModified
 		t.lastCheck = time.Now()
 		t.lastError = ""
+		t.prioChecked = true
 		t.mu.Unlock()
 		t.m.touch()
+		t.m.checkPriorityDone(t)
 		return queue.Result{}, nil
 	}
 
@@ -191,22 +266,25 @@ func (t *Thread) Process(ctx context.Context) (queue.Result, error) {
 		return queue.Result{}, err
 	}
 
-	subject := ""
+	// The subject is recorded before anything is saved, so the folder is created with it.
 	if needSubject {
-		subject = fourchan.ExtractSubject(&thread.Posts[0])
+		subject := fourchan.ExtractSubject(&thread.Posts[0])
+		t.mu.Lock()
+		if !t.subjectSet {
+			t.subject, t.subjectSet = subject, true
+		}
+		t.mu.Unlock()
 	}
 
 	uploads := fourchan.Uploads(ep, t.Board, thread.Posts)
 	var thumbs []fourchan.ThumbInfo
 
 	if s.SaveHTML {
-		if s.Max1RequestPerSecond {
-			// Two requests in one item: keep them a second apart as well.
-			select {
-			case <-time.After(time.Second):
-			case <-ctx.Done():
-				return queue.Result{}, ctx.Err()
-			}
+		// A second request in one check: keep it a second apart from the first.
+		select {
+		case <-time.After(apiSpacing):
+		case <-ctx.Done():
+			return queue.Result{}, ctx.Err()
 		}
 		page, err := t.m.client.GetString(ctx, ep.ThreadHTMLURL(t.Board, t.ID))
 		if err != nil {
@@ -218,11 +296,12 @@ func (t *Thread) Process(ctx context.Context) (queue.Result, error) {
 			local[i] = fourchan.LocalUpload{Tim: u.Tim, Ext: u.Ext, Filename: uploadFilename(u, s.ImageFilenameFormat)}
 		}
 		page = fourchan.FixThreadHTMLLinks(fourchan.PrepareThreadHTML(page), t.Board, local, s.SaveThumbnails)
-		if err := os.MkdirAll(t.SaveTo, 0o755); err != nil {
+		dir, err := t.ensureDir()
+		if err != nil {
 			t.noteError(err)
 			return queue.Result{}, err
 		}
-		if err := config.WriteFileAtomic(filepath.Join(t.SaveTo, "Thread.html"), []byte(page), 0o644); err != nil {
+		if err := config.WriteFileAtomic(filepath.Join(dir, "Thread.html"), []byte(page), 0o644); err != nil {
 			t.noteError(err)
 			return queue.Result{}, err
 		}
@@ -233,10 +312,6 @@ func (t *Thread) Process(ctx context.Context) (queue.Result, error) {
 
 	var newItems []queue.Item
 	t.mu.Lock()
-	if needSubject && !t.subjectSet {
-		t.subject = subject
-		t.subjectSet = true
-	}
 	for _, u := range uploads {
 		id := uploadID(t.ID, u.Tim)
 		if _, ok := t.seen[id]; ok {
@@ -255,73 +330,82 @@ func (t *Thread) Process(ctx context.Context) (queue.Result, error) {
 	}
 	t.fileCount = len(uploads)
 	t.fileCountKnown = true
-	t.priority = queue.Default
+	t.lane = queue.Default
 	// Recorded only now that the results are handled, so a failure above fetches them again next time.
 	t.lastModified = res.LastModified
 	t.lastCheck = time.Now()
 	t.lastError = ""
+	t.prioChecked = true
 	t.mu.Unlock()
 	t.m.touch()
+	t.m.checkPriorityDone(t)
 
 	return queue.Result{Enqueue: newItems}, nil
 }
 
 // ThreadView is the thread as shown in the UI.
 type ThreadView struct {
-	Key       string    `json:"key"`
-	Site      string    `json:"site"`
-	Board     string    `json:"board"`
-	ID        int64     `json:"id"`
-	URL       string    `json:"url"`
-	Subject   string    `json:"subject"`
-	Loading   bool      `json:"loading"`
-	FileCount *int      `json:"file_count"`
-	Saved     int       `json:"saved"`
-	Pending   *int      `json:"pending"`
-	LastCheck time.Time `json:"last_check,omitzero"`
-	NextCheck time.Time `json:"next_check,omitzero"`
-	LastError string    `json:"last_error,omitempty"`
-	SaveTo    string    `json:"save_to"`
-	SharePath string    `json:"share_path,omitempty"`
-	AddedAt   time.Time `json:"added_at"`
+	Key          string    `json:"key"`
+	Site         string    `json:"site"`
+	Board        string    `json:"board"`
+	ID           int64     `json:"id"`
+	URL          string    `json:"url"`
+	Subject      string    `json:"subject"`
+	Loading      bool      `json:"loading"`
+	FileCount    *int      `json:"file_count"`
+	Saved        int       `json:"saved"`
+	Pending      *int      `json:"pending"`
+	Failed       int       `json:"failed,omitempty"`
+	Priority     int       `json:"priority,omitempty"`
+	LastCheck    time.Time `json:"last_check,omitzero"`
+	NextCheck    time.Time `json:"next_check,omitzero"`
+	LastError    string    `json:"last_error,omitempty"`
+	SaveTo       string    `json:"save_to"`
+	SharePath    string    `json:"share_path,omitempty"`
+	FolderExists bool      `json:"folder_exists"`
+	AddedAt      time.Time `json:"added_at"`
 }
 
 func (t *Thread) view(interval time.Duration) ThreadView {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	saveTo := t.dir
+	if saveTo == "" {
+		saveTo = t.plannedDirLocked()
+	}
 	v := ThreadView{
-		Key:       t.Key(),
-		Site:      t.Site,
-		Board:     t.Board,
-		ID:        t.ID,
-		URL:       t.URL(),
-		Subject:   t.displaySubjectLocked(),
-		Loading:   !t.subjectSet && !t.fileCountKnown,
-		LastCheck: t.lastCheck,
-		LastError: t.lastError,
-		SaveTo:    t.SaveTo,
-		SharePath: SharePath(t.SaveTo),
-		AddedAt:   t.AddedAt,
+		Key:          t.Key(),
+		Site:         t.Site,
+		Board:        t.Board,
+		ID:           t.ID,
+		URL:          t.URL(),
+		Subject:      t.displaySubjectLocked(),
+		Loading:      !t.subjectSet && !t.fileCountKnown,
+		Priority:     t.prio,
+		LastCheck:    t.lastCheck,
+		LastError:    t.lastError,
+		SaveTo:       saveTo,
+		SharePath:    SharePath(saveTo),
+		FolderExists: t.dir != "",
+		AddedAt:      t.AddedAt,
 	}
 	if !t.lastAttempt.IsZero() {
 		v.NextCheck = t.lastAttempt.Add(interval)
 	}
-	savedUploads, seenUploads := 0, 0
 	for id := range t.saved {
 		if id.Type == AssetUpload {
-			savedUploads++
+			v.Saved++
 		}
 	}
-	for id := range t.seen {
+	for id := range t.failed {
 		if id.Type == AssetUpload {
-			seenUploads++
+			v.Failed++
 		}
 	}
-	v.Saved = savedUploads
 	if t.fileCountKnown {
 		fc := t.fileCount
 		v.FileCount = &fc
-		pending := max(0, seenUploads-savedUploads)
+		pending := t.pendingLocked()
 		v.Pending = &pending
 	}
 	return v

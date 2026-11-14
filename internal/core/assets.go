@@ -82,7 +82,8 @@ type uploadItem struct {
 func (u *uploadItem) Context() context.Context { return u.t.ctx }
 func (u *uploadItem) ShouldProcess() bool      { return u.t.ShouldProcess() }
 func (u *uploadItem) ReadyAt() time.Time       { return time.Time{} }
-func (u *uploadItem) Priority() queue.Priority { return queue.Default }
+func (u *uploadItem) Order() queue.Order       { return u.t.assetOrder(queue.Default) }
+func (u *uploadItem) GaveUp()                  { u.t.markFailed(u.id) }
 func (u *uploadItem) IsAsset() bool            { return true }
 func (u *uploadItem) String() string           { return "Upload " + u.id.ID }
 
@@ -90,15 +91,13 @@ func (u *uploadItem) Process(ctx context.Context) (queue.Result, error) {
 	if !u.ShouldProcess() {
 		return queue.Result{Remove: true}, nil
 	}
-	u.t.active.Add(1)
-	defer u.t.active.Done()
-
-	if err := os.MkdirAll(u.t.SaveTo, 0o755); err != nil {
+	dir, err := u.t.ensureDir()
+	if err != nil {
 		u.t.noteError(err)
 		return queue.Result{}, err
 	}
 	name := uploadFilename(u.info, u.t.m.cfg.Get().ImageFilenameFormat)
-	if err := u.t.m.client.DownloadToFile(ctx, u.info.URL, filepath.Join(u.t.SaveTo, name)); err != nil {
+	if err := u.t.m.client.DownloadToFile(ctx, u.info.URL, filepath.Join(dir, name)); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			u.t.noteError(fmt.Errorf("download %s: %w", name, err))
 		}
@@ -119,19 +118,21 @@ func (th *thumbnailItem) Context() context.Context { return th.t.ctx }
 func (th *thumbnailItem) ShouldProcess() bool {
 	return th.t.m.cfg.Get().SaveThumbnails && th.t.ShouldProcess()
 }
-func (th *thumbnailItem) ReadyAt() time.Time       { return time.Time{} }
-func (th *thumbnailItem) Priority() queue.Priority { return queue.Low }
-func (th *thumbnailItem) IsAsset() bool            { return true }
-func (th *thumbnailItem) String() string           { return "Thumbnail " + th.id.ID }
+func (th *thumbnailItem) ReadyAt() time.Time { return time.Time{} }
+func (th *thumbnailItem) Order() queue.Order { return th.t.assetOrder(queue.Low) }
+func (th *thumbnailItem) GaveUp()            { th.t.markFailed(th.id) }
+func (th *thumbnailItem) IsAsset() bool      { return true }
+func (th *thumbnailItem) String() string     { return "Thumbnail " + th.id.ID }
 
 func (th *thumbnailItem) Process(ctx context.Context) (queue.Result, error) {
 	if !th.ShouldProcess() {
 		return queue.Result{Remove: true}, nil
 	}
-	th.t.active.Add(1)
-	defer th.t.active.Done()
-
-	dir := filepath.Join(th.t.SaveTo, "thumb")
+	threadDir, err := th.t.ensureDir()
+	if err != nil {
+		return queue.Result{}, err
+	}
+	dir := filepath.Join(threadDir, "thumb")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return queue.Result{}, err
 	}

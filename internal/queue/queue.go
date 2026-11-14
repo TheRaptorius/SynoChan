@@ -1,7 +1,9 @@
 // Package queue schedules scraping and downloading work.
 //
-// Items are only taken off the queue when there is capacity, so priority order, request spacing and
-// "Too Many Requests" backoff apply to every request.
+// Two kinds of work share the queue. Trackers (thread and board checks) talk to the image board's API: they
+// run one at a time, at most one per second, and always go before downloads, so checks are never stuck
+// behind a long download backlog. Assets (file downloads) run in parallel up to a configurable limit,
+// optionally spaced one second apart, in order of their thread's priority and then first come, first served.
 package queue
 
 import (
@@ -9,23 +11,33 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
 	"synochan/internal/fetch"
 )
 
-// Priority decides which lane an item waits in. Lower values are processed first.
-type Priority int
+// Lane orders items of the same kind and rank. Lower values go first.
+type Lane int
 
 const (
-	High Priority = iota
+	High Lane = iota
 	Default
 	Low
-	laneCount
 )
 
-// Item is a unit of work: a thread or board scrape, or a file download.
+// NoRank is the rank of items without a priority. Ranked items (1, 2, 3, …) go before them.
+const NoRank = math.MaxInt32
+
+// Order decides which of several ready items of the same kind runs first: lower Rank, then lower Lane,
+// then the one queued earliest.
+type Order struct {
+	Rank int
+	Lane Lane
+}
+
+// Item is a unit of work: a thread or board check, or a file download.
 type Item interface {
 	// Context is cancelled when the item is no longer wanted (e.g. its thread was removed).
 	Context() context.Context
@@ -33,12 +45,18 @@ type Item interface {
 	ShouldProcess() bool
 	// ReadyAt is the earliest time the item may be processed. Zero means any time.
 	ReadyAt() time.Time
-	Priority() Priority
+	// Order is read whenever the next item is picked, so it may change while the item waits.
+	Order() Order
 	// IsAsset reports whether this is a file download. Assets are dropped after repeated failures,
 	// trackers are retried indefinitely.
 	IsAsset() bool
 	Process(ctx context.Context) (Result, error)
 	String() string
+}
+
+// GiveUpNotifier is implemented by items that want to know when the queue stopped retrying them.
+type GiveUpNotifier interface {
+	GaveUp()
 }
 
 // Result is what processing an item produced.
@@ -53,14 +71,21 @@ type Result struct {
 	OnTrackersAdded func()
 }
 
+// Limits are the user configurable limits, read before every scheduling decision.
+type Limits struct {
+	MaxDownloads   int  // Parallel file downloads.
+	SpaceDownloads bool // Start file downloads at most one per second.
+}
+
 // Options configure a queue.
 type Options struct {
-	// Limits returns the current concurrency limit and whether requests are spaced one second apart.
-	Limits func() (maxConcurrent int, oneRequestPerSecond bool)
+	Limits func() Limits
 	// AddTrackers adds new trackers found by source and enqueues them, then runs onAdded, in one step.
 	// Returns false if nothing was done (source was removed meanwhile).
 	AddTrackers func(source Item, trackers []Item, onAdded func()) bool
-	Logger      *slog.Logger
+	// TrackerSpacing is the minimum time between the starts of two trackers. Defaults to one second.
+	TrackerSpacing time.Duration
+	Logger         *slog.Logger
 }
 
 const (
@@ -69,11 +94,17 @@ const (
 	maxRetryDelay     = 10 * time.Minute
 	idleWait          = 15 * time.Second
 	tooManyDefault    = time.Minute
+	downloadSpacing   = time.Second
 )
 
 type retryState struct {
 	failures int
 	at       time.Time
+}
+
+type entry struct {
+	item Item
+	seq  uint64
 }
 
 // Status is a snapshot for display.
@@ -84,29 +115,36 @@ type Status struct {
 	BackoffUntil time.Time `json:"backoff_until,omitzero"`
 }
 
-// Queue is a distinct, prioritised work queue with a bounded number of running items.
+// Queue is a distinct work queue with separate limits for trackers and downloads.
 type Queue struct {
 	opts Options
 	log  *slog.Logger
 
-	mu           sync.Mutex
-	lanes        [laneCount][]Item
-	queued       map[Item]struct{}
-	retries      map[Item]retryState
-	running      int
-	paused       bool
-	tooMany      time.Duration
-	backoffUntil time.Time
+	mu               sync.Mutex
+	entries          []entry
+	queued           map[Item]struct{}
+	nextSeq          uint64
+	retries          map[Item]retryState
+	runningTrackers  int
+	runningAssets    int
+	lastTrackerStart time.Time
+	lastAssetStart   time.Time
+	paused           bool
+	tooMany          time.Duration
+	backoffUntil     time.Time
 
 	wake chan struct{}
 	done chan struct{}
-	idle chan struct{} // Closed and replaced when running drops to zero; used by WaitIdle.
+	idle chan struct{} // Closed and replaced when nothing runs any more; used by WaitIdle.
 }
 
 // New creates a queue. Call Run to start processing.
 func New(opts Options) *Queue {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
+	}
+	if opts.TrackerSpacing <= 0 {
+		opts.TrackerSpacing = time.Second
 	}
 	return &Queue{
 		opts:    opts,
@@ -134,16 +172,16 @@ func (q *Queue) Enqueue(item Item) {
 	q.signal()
 }
 
+// Wake makes the queue re-evaluate what to run next, e.g. after priorities changed.
+func (q *Queue) Wake() { q.signal() }
+
 func (q *Queue) enqueueLocked(item Item) {
 	if _, ok := q.queued[item]; ok {
 		return
 	}
 	q.queued[item] = struct{}{}
-	p := item.Priority()
-	if p < High || p >= laneCount {
-		p = Default
-	}
-	q.lanes[p] = append(q.lanes[p], item)
+	q.nextSeq++
+	q.entries = append(q.entries, entry{item: item, seq: q.nextSeq})
 }
 
 // SetPaused stops or resumes starting new work. Running items finish.
@@ -158,7 +196,7 @@ func (q *Queue) SetPaused(paused bool) {
 func (q *Queue) Status() Status {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	s := Status{Paused: q.paused, Active: q.running, Queued: len(q.queued)}
+	s := Status{Paused: q.paused, Active: q.runningTrackers + q.runningAssets, Queued: len(q.entries)}
 	if time.Now().Before(q.backoffUntil) {
 		s.BackoffUntil = q.backoffUntil
 	}
@@ -169,19 +207,17 @@ func (q *Queue) Status() Status {
 func (q *Queue) Purge() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for p := range q.lanes {
-		kept := q.lanes[p][:0]
-		for _, item := range q.lanes[p] {
-			if item.ShouldProcess() {
-				kept = append(kept, item)
-			} else {
-				delete(q.queued, item)
-				delete(q.retries, item)
-			}
+	kept := q.entries[:0]
+	for _, e := range q.entries {
+		if e.item.ShouldProcess() {
+			kept = append(kept, e)
+		} else {
+			delete(q.queued, e.item)
+			delete(q.retries, e.item)
 		}
-		clear(q.lanes[p][len(kept):])
-		q.lanes[p] = kept
 	}
+	clear(q.entries[len(kept):])
+	q.entries = kept
 }
 
 // Done is closed when Run has returned.
@@ -191,7 +227,7 @@ func (q *Queue) Done() <-chan struct{} { return q.done }
 func (q *Queue) WaitIdle(ctx context.Context) error {
 	for {
 		q.mu.Lock()
-		if q.running == 0 {
+		if q.runningTrackers+q.runningAssets == 0 {
 			q.mu.Unlock()
 			return nil
 		}
@@ -241,17 +277,20 @@ func sleep(ctx context.Context, d time.Duration) {
 }
 
 func (q *Queue) step(ctx context.Context) {
-	maxConcurrent, oneRPS := q.opts.Limits()
-	maxConcurrent = max(1, maxConcurrent)
+	lim := Limits{MaxDownloads: 1}
+	if q.opts.Limits != nil {
+		lim = q.opts.Limits()
+	}
+	lim.MaxDownloads = max(1, lim.MaxDownloads)
 
 	q.mu.Lock()
-	if q.paused || q.running >= maxConcurrent {
+	if q.paused {
 		q.mu.Unlock()
 		q.wait(ctx, 0)
 		return
 	}
 	if q.tooMany > 0 {
-		if q.running > 0 {
+		if q.runningTrackers+q.runningAssets > 0 {
 			// Let requests already in flight finish first. Any 429s they get merge into this one wait.
 			q.mu.Unlock()
 			q.wait(ctx, 0)
@@ -266,65 +305,114 @@ func (q *Queue) step(ctx context.Context) {
 		return
 	}
 
-	item, nextReadyAt := q.dequeueReadyLocked(time.Now())
+	now := time.Now()
+	item, wakeAt := q.pickLocked(now, lim)
 	if item == nil {
 		q.mu.Unlock()
-		wait := idleWait
-		if !nextReadyAt.IsZero() {
-			wait = min(wait, time.Until(nextReadyAt))
+		wait := time.Duration(0) // Only a wake signal (a finished item, a new item) can change anything.
+		if !wakeAt.IsZero() {
+			wait = max(time.Millisecond, min(idleWait, time.Until(wakeAt)))
 		}
-		if wait > 0 {
-			q.wait(ctx, wait)
-		}
+		q.wait(ctx, wait)
 		return
 	}
-	q.running++
+	if item.IsAsset() {
+		q.runningAssets++
+		q.lastAssetStart = now
+	} else {
+		q.runningTrackers++
+		q.lastTrackerStart = now
+	}
 	q.mu.Unlock()
 
 	q.log.Debug("starting", "item", item)
 	go q.run(ctx, item)
-
-	if oneRPS {
-		sleep(ctx, time.Second)
-	}
 }
 
-// dequeueReadyLocked takes items off the lanes until one is ready, putting deferred ones back.
-// Returns nil and the earliest ready time of deferred items when none is ready.
-func (q *Queue) dequeueReadyLocked(now time.Time) (Item, time.Time) {
-	var deferred []Item
-	var nextReadyAt time.Time
-	defer func() {
-		for _, d := range deferred {
-			q.enqueueLocked(d)
-		}
-	}()
+// pickLocked takes the best ready item that has a free slot off the queue. When there is none, it returns
+// the time something becomes possible without outside events (an item getting ready or a spacing expiring),
+// or zero if only a finished or new item can change anything.
+func (q *Queue) pickLocked(now time.Time, lim Limits) (Item, time.Time) {
+	trackerFreeAt := q.lastTrackerStart.Add(q.opts.TrackerSpacing)
+	trackerSlot := q.runningTrackers == 0 && !trackerFreeAt.After(now)
 
-	for p := range q.lanes {
-		for len(q.lanes[p]) > 0 {
-			item := q.lanes[p][0]
-			q.lanes[p][0] = nil
-			q.lanes[p] = q.lanes[p][1:]
-			delete(q.queued, item)
+	assetFreeAt := time.Time{}
+	if lim.SpaceDownloads {
+		assetFreeAt = q.lastAssetStart.Add(downloadSpacing)
+	}
+	assetSlot := q.runningAssets < lim.MaxDownloads && !assetFreeAt.After(now)
 
-			if !item.ShouldProcess() {
-				delete(q.retries, item)
-				continue
-			}
-			readyAt := item.ReadyAt()
-			if r, ok := q.retries[item]; ok && r.at.After(readyAt) {
-				readyAt = r.at
-			}
-			if readyAt.IsZero() || !readyAt.After(now) {
-				return item, time.Time{}
-			}
-			deferred = append(deferred, item)
-			if nextReadyAt.IsZero() || readyAt.Before(nextReadyAt) {
-				nextReadyAt = readyAt
-			}
+	best := -1
+	var bestOrder Order
+	var wakeAt time.Time
+	earliest := func(t time.Time) {
+		if !t.IsZero() && (wakeAt.IsZero() || t.Before(wakeAt)) {
+			wakeAt = t
 		}
 	}
-	return nil, nextReadyAt
+
+	kept := q.entries[:0]
+	for _, e := range q.entries {
+		if !e.item.ShouldProcess() {
+			delete(q.queued, e.item)
+			delete(q.retries, e.item)
+			continue
+		}
+		kept = append(kept, e)
+		idx := len(kept) - 1
+
+		readyAt := e.item.ReadyAt()
+		if r, ok := q.retries[e.item]; ok && r.at.After(readyAt) {
+			readyAt = r.at
+		}
+		if !readyAt.IsZero() && readyAt.After(now) {
+			earliest(readyAt)
+			continue
+		}
+
+		asset := e.item.IsAsset()
+		if asset && !assetSlot {
+			if q.runningAssets < lim.MaxDownloads {
+				earliest(assetFreeAt)
+			}
+			continue
+		}
+		if !asset && !trackerSlot {
+			if q.runningTrackers == 0 {
+				earliest(trackerFreeAt)
+			}
+			continue
+		}
+
+		order := e.item.Order()
+		if best < 0 || better(asset, order, e.seq, kept[best].item.IsAsset(), bestOrder, kept[best].seq) {
+			best, bestOrder = idx, order
+		}
+	}
+	clear(q.entries[len(kept):])
+	q.entries = kept
+
+	if best < 0 {
+		return nil, wakeAt
+	}
+	item := q.entries[best].item
+	q.entries = append(q.entries[:best], q.entries[best+1:]...)
+	delete(q.queued, item)
+	return item, time.Time{}
+}
+
+// better reports whether item a goes before item b: trackers before assets, then lower rank, lane and sequence.
+func better(aAsset bool, a Order, aSeq uint64, bAsset bool, b Order, bSeq uint64) bool {
+	if aAsset != bAsset {
+		return !aAsset
+	}
+	if a.Rank != b.Rank {
+		return a.Rank < b.Rank
+	}
+	if a.Lane != b.Lane {
+		return a.Lane < b.Lane
+	}
+	return aSeq < bSeq
 }
 
 func (q *Queue) run(ctx context.Context, item Item) {
@@ -340,8 +428,12 @@ func (q *Queue) run(ctx context.Context, item Item) {
 	q.handle(ctx, item, res, err)
 
 	q.mu.Lock()
-	q.running--
-	if q.running == 0 {
+	if item.IsAsset() {
+		q.runningAssets--
+	} else {
+		q.runningTrackers--
+	}
+	if q.runningTrackers+q.runningAssets == 0 {
 		close(q.idle)
 		q.idle = make(chan struct{})
 	}
@@ -388,6 +480,9 @@ func (q *Queue) handle(ctx context.Context, item Item, res Result, err error) {
 	case fetch.IsGone(err):
 		q.forget(item)
 		q.log.Debug("gone", "item", item, "err", err)
+		if n, ok := item.(GiveUpNotifier); ok {
+			n.GaveUp()
+		}
 
 	case errors.As(err, &tooMany):
 		delay := tooMany.RetryAfter
@@ -414,16 +509,19 @@ func (q *Queue) forget(item Item) {
 // retryLater requeues a failed item with exponential backoff, or gives up on an asset that keeps failing.
 func (q *Queue) retryLater(item Item, err error) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
-
 	failures := q.retries[item].failures + 1
 	if item.IsAsset() && failures >= maxAssetAttempts {
 		delete(q.retries, item)
+		q.mu.Unlock()
 		q.log.Error("giving up", "item", item, "attempts", failures, "err", err)
+		if n, ok := item.(GiveUpNotifier); ok {
+			n.GaveUp()
+		}
 		return
 	}
 	delay := min(initialRetryDelay<<min(failures-1, 20), maxRetryDelay)
 	q.retries[item] = retryState{failures: failures, at: time.Now().Add(delay)}
-	q.log.Warn("failed, retrying later", "item", item, "attempt", failures, "retry_in", delay, "err", err)
 	q.enqueueLocked(item)
+	q.mu.Unlock()
+	q.log.Warn("failed, retrying later", "item", item, "attempt", failures, "retry_in", delay, "err", err)
 }

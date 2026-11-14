@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -27,9 +28,13 @@ type threadState struct {
 	Subject      *string   `json:"subject,omitempty"`
 	FileCount    *int      `json:"file_count,omitempty"`
 	LastModified time.Time `json:"last_modified,omitzero"`
-	SaveTo       string    `json:"save_to"`
+	Root         string    `json:"root"`
+	Dir          string    `json:"dir,omitempty"`
+	SaveTo       string    `json:"save_to,omitempty"` // Folder of earlier versions; read only.
+	Priority     int       `json:"priority,omitempty"`
 	AddedAt      time.Time `json:"added_at"`
 	SavedAssets  []string  `json:"saved_assets"`
+	FailedAssets []string  `json:"failed_assets,omitempty"`
 }
 
 type boardState struct {
@@ -49,7 +54,9 @@ func (t *Thread) state() threadState {
 		Board:        t.Board,
 		ID:           t.ID,
 		LastModified: t.lastModified,
-		SaveTo:       t.SaveTo,
+		Root:         t.Root,
+		Dir:          t.dir,
+		Priority:     t.prio,
 		AddedAt:      t.AddedAt,
 		SavedAssets:  make([]string, 0, len(t.saved)),
 	}
@@ -64,12 +71,33 @@ func (t *Thread) state() threadState {
 	for id := range t.saved {
 		s.SavedAssets = append(s.SavedAssets, id.String())
 	}
+	for id := range t.failed {
+		s.FailedAssets = append(s.FailedAssets, id.String())
+	}
 	slices.Sort(s.SavedAssets)
+	slices.Sort(s.FailedAssets)
 	return s
 }
 
 func (m *Manager) threadFromState(s threadState) *Thread {
-	t := m.newThread(s.Board, s.ID, s.SaveTo)
+	root, dir := s.Root, s.Dir
+	if root == "" && s.SaveTo != "" {
+		// Earlier versions stored <root>/4chan/<board>/<number>.
+		root = filepath.Dir(filepath.Dir(filepath.Dir(s.SaveTo)))
+		if dir == "" {
+			if info, err := os.Stat(s.SaveTo); err == nil && info.IsDir() {
+				dir = s.SaveTo
+			}
+		}
+	}
+	if dir != "" {
+		if _, err := os.Stat(dir); err != nil {
+			dir = "" // Moved or deleted meanwhile: created again with the next file.
+		}
+	}
+	t := m.newThread(s.Board, s.ID, root)
+	t.dir = dir
+	t.prio = max(0, s.Priority)
 	t.AddedAt = s.AddedAt
 	if s.Subject != nil {
 		t.subject, t.subjectSet = *s.Subject, true
@@ -89,6 +117,7 @@ func (m *Manager) threadFromState(s threadState) *Thread {
 			uploadsSaved++
 		}
 	}
+	// Files given up on are tried again after a restart.
 	// Only send If-Modified-Since when every file was saved. Otherwise the next scrape downloads the thread
 	// regardless, so files that were found but not saved before a restart are queued again.
 	if s.FileCount != nil && *s.FileCount == uploadsSaved {

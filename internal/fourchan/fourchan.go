@@ -49,9 +49,9 @@ func ThreadURL(board string, id int64) string {
 	return fmt.Sprintf("https://boards.4chan.org/%s/thread/%d", board, id)
 }
 
-// BoardURL is the public URL of a board.
+// BoardURL is the public URL of a board's catalog.
 func BoardURL(board string) string {
-	return fmt.Sprintf("https://boards.4chan.org/%s/", board)
+	return fmt.Sprintf("https://boards.4chan.org/%s/catalog", board)
 }
 
 var (
@@ -221,29 +221,61 @@ func Thumbnails(e Endpoints, board string, posts []Post) []ThumbInfo {
 	return out
 }
 
+// SubjectFromTextLength is the longest subject taken from the start of a post's text.
+const SubjectFromTextLength = 40
+
 // ExtractSubject picks a subject from an opening post: the subject field, else a non default name
-// (people often type the subject into the name field), else a short single line comment.
+// (people often type the subject into the name field), else the start of the post's text.
 // Returns "" when nothing suitable is present.
 func ExtractSubject(p *Post) string {
-	var result string
-	switch {
-	case p.Sub != nil:
-		result = html.UnescapeString(*p.Sub)
-	case p.Name == nil || *p.Name != "Anonymous":
-		if p.Name != nil {
-			result = *p.Name
-			break
-		}
-		fallthrough
-	default:
-		if p.Com != nil {
-			com := html.UnescapeString(*p.Com)
-			if utf8.RuneCountInString(com) < 64 && !strings.Contains(com, "<br>") {
-				result = com
-			}
+	if p.Sub != nil {
+		if s := SanitiseSubject(html.UnescapeString(*p.Sub)); s != "" {
+			return s
 		}
 	}
-	return SanitiseSubject(result)
+	if p.Name != nil && *p.Name != "Anonymous" {
+		if s := SanitiseSubject(html.UnescapeString(*p.Name)); s != "" {
+			return s
+		}
+	}
+	if p.Com != nil {
+		return SanitiseSubject(SubjectFromText(*p.Com, SubjectFromTextLength))
+	}
+	return ""
+}
+
+var (
+	quoteLinkRe = regexp.MustCompile(`(?is)<a[^>]*class="[^"]*quotelink[^"]*"[^>]*>.*?</a>|<span[^>]*class="[^"]*deadlink[^"]*"[^>]*>.*?</span>`)
+	lineBreakRe = regexp.MustCompile(`(?i)<br\s*/?>|<wbr\s*/?>`)
+	tagRe       = regexp.MustCompile(`<[^>]*>`)
+	urlRe       = regexp.MustCompile(`(?i)\bhttps?://\S+`)
+)
+
+// SubjectFromText turns a post's HTML into a short subject: reply links, tags and URLs are removed,
+// greentext arrows dropped, whitespace collapsed, and the text cut at a word boundary to at most max runes.
+func SubjectFromText(com string, max int) string {
+	com = quoteLinkRe.ReplaceAllString(com, " ")
+	com = lineBreakRe.ReplaceAllString(com, " ")
+	com = tagRe.ReplaceAllString(com, "")
+	com = html.UnescapeString(com)
+	com = urlRe.ReplaceAllString(com, " ")
+	words := strings.Fields(com)
+	for i, w := range words {
+		words[i] = strings.TrimLeft(w, ">")
+	}
+	text := strings.Join(strings.Fields(strings.Join(words, " ")), " ")
+	if utf8.RuneCountInString(text) <= max {
+		return text
+	}
+	runes := []rune(text)
+	cut := runes[:max]
+	if runes[max] == ' ' {
+		return string(cut) // The cut falls exactly between two words.
+	}
+	if i := strings.LastIndexByte(string(cut), ' '); i > max/2 {
+		return strings.TrimSpace(string(cut)[:i])
+	}
+	return strings.TrimSpace(string(cut))
 }
 
 // illegalNameChars are the characters Windows (and therefore SMB clients) reject in file names.

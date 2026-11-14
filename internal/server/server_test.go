@@ -78,8 +78,23 @@ func TestAPIFlow(t *testing.T) {
 		t.Fatalf("subject %v", subj)
 	}
 
+	if code, _ := call(t, h, "POST", "/api/threads/prioritize", `{"keys":["4chan/g/1"]}`); code != 200 {
+		t.Fatalf("prioritize: %d", code)
+	}
+	_, state = call(t, h, "GET", "/api/state", "")
+	if p := state["threads"].([]any)[0].(map[string]any)["priority"]; p != float64(1) {
+		t.Fatalf("priority %v", p)
+	}
+	call(t, h, "POST", "/api/threads/unprioritize", `{"keys":["4chan/g/1"]}`)
+	if code, _ := call(t, h, "POST", "/api/threads/prioritize", `{"keys":["nope"]}`); code != 404 {
+		t.Fatalf("unknown thread: %d", code)
+	}
+	if state["save_path"] == "" {
+		t.Fatal("snapshot lacks the save path")
+	}
+
 	_, urls := call(t, h, "GET", "/api/urls?kind=boards", "")
-	if u := urls["urls"].([]any); len(u) != 1 || u[0] != "https://boards.4chan.org/a/" {
+	if u := urls["urls"].([]any); len(u) != 1 || u[0] != "https://boards.4chan.org/a/catalog" {
 		t.Fatalf("urls %v", urls)
 	}
 
@@ -107,16 +122,19 @@ func TestAPIFlow(t *testing.T) {
 
 func TestAPISettings(t *testing.T) {
 	h, _ := newAPI(t)
-	code, out := call(t, h, "POST", "/api/settings", `{"min_seconds_between_scrapes":1}`)
-	if code != 400 || !strings.Contains(out["error"].(string), "at least 5") {
+	code, out := call(t, h, "POST", "/api/settings", `{"min_seconds_between_scrapes":5}`)
+	if code != 400 || !strings.Contains(out["error"].(string), "at least 10") {
 		t.Fatalf("invalid settings: %d %v", code, out)
 	}
-	code, out = call(t, h, "POST", "/api/settings", `{"save_html":true,"max_concurrent_downloads":3}`)
-	if code != 200 || out["save_html"] != true || out["max_concurrent_downloads"].(float64) != 3 || out["keep_lists"] != true {
+	code, out = call(t, h, "POST", "/api/settings", `{"save_html":true,"max_concurrent_downloads":2,"theme":"dark"}`)
+	if code != 200 || out["save_html"] != true || out["max_concurrent_downloads"].(float64) != 2 || out["keep_lists"] != true || out["theme"] != "dark" {
 		t.Fatalf("partial update: %d %v", code, out)
 	}
 	if code, _ := call(t, h, "GET", "/api/settings", ""); code != 200 {
 		t.Fatal("get settings")
+	}
+	if code, _ := call(t, h, "POST", "/api/settings", `{"theme":"purple"}`); code != 400 {
+		t.Fatal("unknown theme accepted")
 	}
 	if code, _ := call(t, h, "POST", "/api/settings", `not json`); code != 400 {
 		t.Fatal("bad body accepted")

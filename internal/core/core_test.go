@@ -31,6 +31,7 @@ type fakeBoard struct {
 	requests     map[string]int
 	notModified  int
 	imageRequest int
+	downloads    []string
 }
 
 func newFakeBoard() *fakeBoard {
@@ -125,6 +126,7 @@ func (f *fakeBoard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(b.String()))
 	case strings.HasPrefix(r.URL.Path, "/g/"):
 		f.imageRequest++
+		f.downloads = append(f.downloads, r.URL.Path)
 		w.Write([]byte("file:" + r.URL.Path))
 	default:
 		http.NotFound(w, r)
@@ -157,9 +159,8 @@ func newHarness(t *testing.T, mutate func(*config.Settings)) *harness {
 	h.srv = httptest.NewServer(h.board)
 	t.Cleanup(h.srv.Close)
 	s := config.Defaults(h.root)
-	s.Max1RequestPerSecond = false
 	s.MaxConcurrentDownloads = 4
-	s.MinSecondsBetweenScrapes = 5
+	s.MinSecondsBetweenScrapes = 10
 	if mutate != nil {
 		mutate(&s)
 	}
@@ -170,11 +171,12 @@ func newHarness(t *testing.T, mutate func(*config.Settings)) *harness {
 
 func (h *harness) start() {
 	h.m = New(Options{
-		Config:    h.cfg,
-		Client:    fetch.New(func() string { return "test" }),
-		Endpoints: fourchan.Endpoints{API: h.srv.URL, Images: h.srv.URL, Thumbs: h.srv.URL, Boards: h.srv.URL},
-		StatePath: filepath.Join(h.data, "state.json"),
-		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config:         h.cfg,
+		Client:         fetch.New(func() string { return "test" }),
+		Endpoints:      fourchan.Endpoints{API: h.srv.URL, Images: h.srv.URL, Thumbs: h.srv.URL, Boards: h.srv.URL},
+		StatePath:      filepath.Join(h.data, "state.json"),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		TrackerSpacing: time.Millisecond,
 	})
 	if err := h.m.Start(); err != nil {
 		h.t.Fatal(err)
@@ -249,13 +251,13 @@ func TestThreadDownloadsFilesAndRechecks(t *testing.T) {
 	if len(res) != 1 || res[0].Status != "added" || res[0].Key != "4chan/g/100" {
 		t.Fatalf("add: %+v", res)
 	}
-	dir := filepath.Join(h.root, "4chan", "g", "100")
+	dir := filepath.Join(h.root, "4chan", "g", "100 - Wallpapers")
 	h.waitFor("two files", func() bool {
 		v := h.thread("4chan/g/100")
 		return v != nil && v.Saved == 2
 	})
 	v := h.thread("4chan/g/100")
-	if v.Subject != "Wallpapers" || *v.FileCount != 2 || *v.Pending != 0 || v.LastError != "" {
+	if v.Subject != "Wallpapers" || *v.FileCount != 2 || *v.Pending != 0 || v.LastError != "" || !v.FolderExists || v.SaveTo != dir {
 		t.Fatalf("view: %+v", v)
 	}
 	if got := files(t, dir); strings.Join(got, ",") != "100.jpg,102.png,Thread.html" {
@@ -302,11 +304,8 @@ func TestFilenameFormats(t *testing.T) {
 	}
 }
 
-func TestGoneThreadIsRemovedAndFolderRenamed(t *testing.T) {
-	h := newHarness(t, func(s *config.Settings) {
-		s.AddThreadSubjectToFolder = true
-		s.ThreadFolderNameFormat = config.FolderIDSubject
-	})
+func TestGoneThreadIsRemovedAndFolderKept(t *testing.T) {
+	h := newHarness(t, nil)
 	h.board.setThread(200, post(200, 1700000000010, "a", ".jpg", map[string]any{"sub": "Old: thread?"}))
 	h.m.AddURLs("https://boards.4chan.org/g/thread/200")
 	h.waitFor("download", func() bool { v := h.thread("4chan/g/200"); return v != nil && v.Saved == 1 })
@@ -316,33 +315,97 @@ func TestGoneThreadIsRemovedAndFolderRenamed(t *testing.T) {
 	h.board.mu.Unlock()
 	h.recheck("4chan/g/200")
 	h.waitFor("removal", func() bool { return h.thread("4chan/g/200") == nil })
-	renamed := filepath.Join(h.root, "4chan", "g", "200 - Old thread")
-	h.waitFor("folder rename", func() bool { _, err := os.Stat(renamed); return err == nil })
-	if _, err := os.Stat(filepath.Join(renamed, "200.jpg")); err != nil {
+	if _, err := os.Stat(filepath.Join(h.root, "4chan", "g", "200 - Old thread", "200.jpg")); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestManualRemoveRenamesSubjectFirstAndAvoidsCollisions(t *testing.T) {
-	h := newHarness(t, func(s *config.Settings) {
-		s.AddThreadSubjectToFolder = true
-		s.ThreadFolderNameFormat = config.FolderSubjectID
-	})
-	h.board.setThread(300, post(300, 1700000000020, "a", ".jpg", nil))
+func TestFolderNamesAndRenaming(t *testing.T) {
+	h := newHarness(t, func(s *config.Settings) { s.FolderName = config.FolderSubjectNumber })
+	h.board.setThread(300, post(300, 1700000000020, "a", ".jpg", nil)) // No subject: named by number.
 	h.m.AddURLs("https://boards.4chan.org/g/thread/300")
 	h.waitFor("download", func() bool { v := h.thread("4chan/g/300"); return v != nil && v.Saved == 1 })
+	base := filepath.Join(h.root, "4chan", "g")
+	if _, err := os.Stat(filepath.Join(base, "300", "300.jpg")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Renaming the thread renames its folder; a taken name gets a suffix.
+	os.MkdirAll(filepath.Join(base, "My Name - 300"), 0o755)
 	if err := h.m.RenameThread("4chan/g/300", "My Name"); err != nil {
 		t.Fatal(err)
 	}
-	os.MkdirAll(filepath.Join(h.root, "4chan", "g", "My Name - 300"), 0o755)
+	if _, err := os.Stat(filepath.Join(base, "My Name - 300 (1)", "300.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	if v := h.thread("4chan/g/300"); v.SaveTo != filepath.Join(base, "My Name - 300 (1)") {
+		t.Fatalf("save_to %q", v.SaveTo)
+	}
+
+	// Removal leaves the folder as it is.
 	if err := h.m.RemoveThread("4chan/g/300"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(h.root, "4chan", "g", "My Name - 300 (1)", "300.jpg")); err != nil {
+	if _, err := os.Stat(filepath.Join(base, "My Name - 300 (1)")); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.m.RemoveThread("4chan/g/300"); err != ErrNotFound {
 		t.Fatalf("second removal: %v", err)
+	}
+}
+
+func TestPriorityDownloadsFirstAndEnds(t *testing.T) {
+	h := newHarness(t, func(s *config.Settings) {
+		s.MaxConcurrentDownloads = 1
+		s.StartPaused = true
+	})
+	var postsA, postsB []map[string]any
+	for i := int64(0); i < 5; i++ {
+		postsA = append(postsA, post(700+i, 1700000007000+i, "a", ".jpg", nil))
+		postsB = append(postsB, post(800+i, 1700000008000+i, "b", ".jpg", nil))
+	}
+	h.board.setThread(700, postsA...)
+	h.board.setThread(800, postsB...)
+	h.m.AddURLs("https://boards.4chan.org/g/thread/700 https://boards.4chan.org/g/thread/800")
+	if err := h.m.Prioritize([]string{"4chan/g/800"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if v := h.thread("4chan/g/800"); v.Priority != 1 {
+		t.Fatalf("priority %d", v.Priority)
+	}
+	h.m.SetPaused(false)
+	h.waitFor("all files", func() bool {
+		a, b := h.thread("4chan/g/700"), h.thread("4chan/g/800")
+		return a.Saved == 5 && b.Saved == 5
+	})
+	// Every file of the prioritised thread came before any of the other thread's.
+	h.board.mu.Lock()
+	order := append([]string(nil), h.board.downloads...)
+	h.board.mu.Unlock()
+	for i, p := range order {
+		if i < 5 && !strings.Contains(p, "170000000800") {
+			t.Fatalf("download order %v", order)
+		}
+	}
+	h.waitFor("priority ended", func() bool { return h.thread("4chan/g/800").Priority == 0 })
+}
+
+func TestPriorityRenumbering(t *testing.T) {
+	h := newHarness(t, func(s *config.Settings) { s.StartPaused = true })
+	h.m.AddURLs("https://boards.4chan.org/g/thread/1 https://boards.4chan.org/g/thread/2 https://boards.4chan.org/g/thread/3")
+	h.m.Prioritize([]string{"4chan/g/1", "4chan/g/2"}, false)
+	h.m.Prioritize([]string{"4chan/g/3"}, true)
+	prio := func(k string) int { return h.thread(k).Priority }
+	if prio("4chan/g/3") != 1 || prio("4chan/g/1") != 2 || prio("4chan/g/2") != 3 {
+		t.Fatalf("priorities %d %d %d", prio("4chan/g/1"), prio("4chan/g/2"), prio("4chan/g/3"))
+	}
+	h.m.Unprioritize([]string{"4chan/g/3"})
+	if prio("4chan/g/3") != 0 || prio("4chan/g/1") != 1 || prio("4chan/g/2") != 2 {
+		t.Fatalf("after unprioritize %d %d %d", prio("4chan/g/1"), prio("4chan/g/2"), prio("4chan/g/3"))
+	}
+	h.m.RemoveThread("4chan/g/1")
+	if prio("4chan/g/2") != 1 {
+		t.Fatalf("after removal %d", prio("4chan/g/2"))
 	}
 }
 

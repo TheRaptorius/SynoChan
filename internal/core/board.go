@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -58,7 +59,7 @@ func (b *Board) String() string { return "Board " + b.Key() }
 func (b *Board) Context() context.Context { return b.ctx }
 func (b *Board) ShouldProcess() bool      { return b.ctx.Err() == nil }
 func (b *Board) IsAsset() bool            { return false }
-func (b *Board) Priority() queue.Priority { return queue.Default }
+func (b *Board) Order() queue.Order       { return queue.Order{Rank: queue.NoRank, Lane: queue.Default} }
 
 func (b *Board) ReadyAt() time.Time {
 	b.mu.Lock()
@@ -134,7 +135,7 @@ func (b *Board) Process(ctx context.Context) (queue.Result, error) {
 			if p.No <= greatest {
 				continue
 			}
-			t := b.m.newThread(b.Code, p.No, threadSaveDir(saveRoot, b.Code, p.No))
+			t := b.m.newThread(b.Code, p.No, saveRoot)
 			if subject := fourchan.ExtractSubject(p); subject != "" {
 				t.subject, t.subjectSet = subject, true
 			}
@@ -170,17 +171,18 @@ func (b *Board) Process(ctx context.Context) (queue.Result, error) {
 
 // BoardView is the board as shown in the UI.
 type BoardView struct {
-	Key         string    `json:"key"`
-	Site        string    `json:"site"`
-	Code        string    `json:"code"`
-	URL         string    `json:"url"`
-	ThreadCount int       `json:"thread_count"`
-	LastCheck   time.Time `json:"last_check,omitzero"`
-	NextCheck   time.Time `json:"next_check,omitzero"`
-	LastError   string    `json:"last_error,omitempty"`
-	SaveTo      string    `json:"save_to"`
-	SharePath   string    `json:"share_path,omitempty"`
-	AddedAt     time.Time `json:"added_at"`
+	Key          string    `json:"key"`
+	Site         string    `json:"site"`
+	Code         string    `json:"code"`
+	URL          string    `json:"url"`
+	ThreadCount  int       `json:"thread_count"`
+	LastCheck    time.Time `json:"last_check,omitzero"`
+	NextCheck    time.Time `json:"next_check,omitzero"`
+	LastError    string    `json:"last_error,omitempty"`
+	SaveTo       string    `json:"save_to"`
+	SharePath    string    `json:"share_path,omitempty"`
+	FolderExists bool      `json:"folder_exists"`
+	AddedAt      time.Time `json:"added_at"`
 }
 
 func (b *Board) view(interval time.Duration) BoardView {
@@ -197,6 +199,9 @@ func (b *Board) view(interval time.Duration) BoardView {
 		SaveTo:      b.SaveTo,
 		SharePath:   SharePath(b.SaveTo),
 		AddedAt:     b.AddedAt,
+	}
+	if info, err := os.Stat(b.SaveTo); err == nil && info.IsDir() {
+		v.FolderExists = true
 	}
 	if !b.lastAttempt.IsZero() {
 		v.NextCheck = b.lastAttempt.Add(interval)

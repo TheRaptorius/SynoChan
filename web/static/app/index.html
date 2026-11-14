@@ -7,7 +7,7 @@
 <link rel="icon" href="../images/icon_32.png">
 <link rel="stylesheet" href="synochan.css">
 </head>
-<body>
+<body data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false">
 <div class="app" id="app">
   <header class="bar">
     <form class="add" id="add-form" autocomplete="off">
@@ -23,6 +23,8 @@
         <span class="visually-hidden">More</span>
       </button>
       <div class="menu" id="main-menu" role="menu" hidden>
+        <button role="menuitem" data-action="open-root" id="menu-open-root">Open download folder</button>
+        <hr>
         <button role="menuitem" data-action="settings">Settings</button>
         <button role="menuitem" data-action="columns">Columns</button>
         <button role="menuitem" data-action="logs">Log</button>
@@ -36,9 +38,10 @@
     <button role="tab" id="tab-boards" aria-selected="false" data-tab="boards">Boards <span class="count" id="count-boards">0</span></button>
     <div class="tab-tools">
       <input type="search" id="filter" placeholder="Filter" aria-label="Filter the list">
-      <button type="button" class="quiet" id="copy-all">Copy all links</button>
-      <button type="button" class="quiet danger" id="remove-selected" hidden>Remove selected</button>
-      <button type="button" class="quiet danger" id="clear-all">Remove all</button>
+      <button type="button" id="open-root">Open download folder</button>
+      <button type="button" id="copy-all">Copy all links</button>
+      <button type="button" class="danger" id="remove-selected" hidden>Remove selected</button>
+      <button type="button" class="danger" id="clear-all">Remove all</button>
     </div>
   </nav>
 
@@ -79,30 +82,43 @@
       </label>
       <label class="check"><input name="save_html" type="checkbox"> Save the thread page (Thread.html)</label>
       <label class="check indent"><input name="save_thumbnails" type="checkbox"> Save video thumbnails for the saved page</label>
-      <label class="check"><input name="add_thread_subject_to_folder" type="checkbox"> Add the subject to the folder name when a thread is removed</label>
-      <label class="field indent">
-        <span>Folder name</span>
-        <select name="thread_folder_name_format">
-          <option value="0">Number - Subject</option>
-          <option value="1">Subject - Number</option>
+      <label class="field">
+        <span>Thread folder names</span>
+        <select name="folder_name">
+          <option value="0">Number (123456)</option>
+          <option value="1">Number - Subject (123456 - Subject)</option>
+          <option value="2">Subject - Number (Subject - 123456)</option>
         </select>
+        <small>A folder is created with the thread's first file. Renaming a thread renames its folder.</small>
       </label>
     </fieldset>
     <fieldset>
       <legend>Checking</legend>
       <label class="field inline">
         <span>Recheck every</span>
-        <input name="min_seconds_between_scrapes" type="number" min="5" step="1" required>
+        <input name="min_seconds_between_scrapes" type="number" min="10" step="1" required>
         <span>seconds</span>
       </label>
       <label class="field inline">
         <span>Parallel downloads</span>
         <input name="max_concurrent_downloads" type="number" min="1" max="16" step="1" required>
       </label>
-      <label class="check"><input name="max_1_request_per_second" type="checkbox"> At most one request per second (recommended, avoids rate limiting)</label>
+      <label class="check"><input name="space_downloads" type="checkbox"> Start at most one download per second</label>
+      <p class="hint">Thread and board checks always run at most once per second, as the 4chan API rules require.</p>
       <label class="field">
         <span>User agent</span>
         <input name="user_agent" type="text" required spellcheck="false">
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend>Appearance</legend>
+      <label class="field">
+        <span>Theme</span>
+        <select name="theme">
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+        <small>The window's title bar belongs to DSM and stays light.</small>
       </label>
     </fieldset>
     <fieldset>
@@ -160,6 +176,8 @@
     <pre class="log" id="log-text"></pre>
     <div class="dialog-actions">
       <button type="button" class="quiet" id="log-refresh">Refresh</button>
+      <button type="button" class="quiet" id="log-copy">Copy</button>
+      <button type="button" class="quiet" id="log-download">Download</button>
       <button value="ok" class="primary">Close</button>
     </div>
   </form>

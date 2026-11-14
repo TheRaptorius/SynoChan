@@ -21,34 +21,46 @@ const (
 	FilenameOriginalAndID ImageFilenameFormat = 3 // LittleSaintJames - 1570301.jpg
 )
 
-// FolderNameFormat decides how a thread folder is renamed when the thread is removed.
+// FolderNameFormat decides how a thread folder is named.
 type FolderNameFormat int
 
 const (
-	FolderIDSubject FolderNameFormat = 0 // 123456 - Subject
-	FolderSubjectID FolderNameFormat = 1 // Subject - 123456
+	FolderNumber        FolderNameFormat = 0 // 123456
+	FolderNumberSubject FolderNameFormat = 1 // 123456 - Subject
+	FolderSubjectNumber FolderNameFormat = 2 // Subject - 123456
 )
 
-// MinSecondsBetweenScrapesFloor is the lowest allowed recheck interval.
-const MinSecondsBetweenScrapesFloor = 5
+// Theme is the colour scheme of the UI.
+type Theme string
+
+const (
+	ThemeLight Theme = "light"
+	ThemeDark  Theme = "dark"
+)
+
+// MinSecondsBetweenScrapesFloor is the lowest allowed recheck interval; the image board's API rules ask
+// for at least 10 seconds between updates of a thread.
+const MinSecondsBetweenScrapesFloor = 10
 
 // MaxConcurrentDownloadsCeiling is the highest allowed number of parallel requests.
 const MaxConcurrentDownloadsCeiling = 16
 
 // Settings are the user-editable options.
 type Settings struct {
-	SavePath                 string              `json:"save_path"`
-	MinSecondsBetweenScrapes int                 `json:"min_seconds_between_scrapes"`
-	Max1RequestPerSecond     bool                `json:"max_1_request_per_second"`
-	MaxConcurrentDownloads   int                 `json:"max_concurrent_downloads"`
-	ImageFilenameFormat      ImageFilenameFormat `json:"image_filename_format"`
-	ThreadFolderNameFormat   FolderNameFormat    `json:"thread_folder_name_format"`
-	AddThreadSubjectToFolder bool                `json:"add_thread_subject_to_folder"`
-	SaveHTML                 bool                `json:"save_html"`
-	SaveThumbnails           bool                `json:"save_thumbnails"`
-	KeepLists                bool                `json:"keep_lists"`
-	UserAgent                string              `json:"user_agent"`
-	StartPaused              bool                `json:"start_paused"`
+	SavePath                 string `json:"save_path"`
+	MinSecondsBetweenScrapes int    `json:"min_seconds_between_scrapes"`
+	// SpaceDownloads starts file downloads at most one per second. API requests are always spaced one
+	// second apart, as the image board's API rules require.
+	SpaceDownloads         bool                `json:"space_downloads"`
+	MaxConcurrentDownloads int                 `json:"max_concurrent_downloads"`
+	ImageFilenameFormat    ImageFilenameFormat `json:"image_filename_format"`
+	FolderName             FolderNameFormat    `json:"folder_name"`
+	Theme                  Theme               `json:"theme"`
+	SaveHTML               bool                `json:"save_html"`
+	SaveThumbnails         bool                `json:"save_thumbnails"`
+	KeepLists              bool                `json:"keep_lists"`
+	UserAgent              string              `json:"user_agent"`
+	StartPaused            bool                `json:"start_paused"`
 }
 
 // DefaultUserAgent mimics a regular browser, as the image board rejects unknown clients.
@@ -59,10 +71,10 @@ func Defaults(savePath string) Settings {
 	return Settings{
 		SavePath:                 savePath,
 		MinSecondsBetweenScrapes: 60,
-		Max1RequestPerSecond:     true,
-		MaxConcurrentDownloads:   1,
+		MaxConcurrentDownloads:   3,
 		ImageFilenameFormat:      FilenameID,
-		ThreadFolderNameFormat:   FolderIDSubject,
+		FolderName:               FolderNumberSubject,
+		Theme:                    ThemeLight,
 		KeepLists:                true,
 		UserAgent:                DefaultUserAgent,
 	}
@@ -85,8 +97,11 @@ func (s *Settings) Validate() error {
 	if s.ImageFilenameFormat < FilenameID || s.ImageFilenameFormat > FilenameOriginalAndID {
 		problems = append(problems, "unknown file name format")
 	}
-	if s.ThreadFolderNameFormat != FolderIDSubject && s.ThreadFolderNameFormat != FolderSubjectID {
+	if s.FolderName < FolderNumber || s.FolderName > FolderSubjectNumber {
 		problems = append(problems, "unknown folder name format")
+	}
+	if s.Theme != ThemeLight && s.Theme != ThemeDark {
+		problems = append(problems, "unknown theme")
 	}
 	if strings.TrimSpace(s.UserAgent) == "" {
 		problems = append(problems, "user agent must not be empty")

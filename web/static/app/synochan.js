@@ -19,6 +19,8 @@
     return node;
   };
 
+  const NO_FOLDER_YET = 'The folder is created with the first file';
+
   const ICONS = {
     folder: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l1.6 1.8h7.4A1.5 1.5 0 0 1 18 7.3v7.2a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 2 14.5z"/></svg>',
     more: '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="1.6"/><circle cx="10" cy="10" r="1.6"/><circle cx="16" cy="10" r="1.6"/></svg>',
@@ -72,6 +74,7 @@
     hidden: loadJSON('hiddenColumns', { threads: [], boards: [] }),
     filter: '',
     connectionError: null,
+    frozenOrder: { threads: null, boards: null },
   };
 
   function loadJSON(key, fallback) {
@@ -142,7 +145,8 @@
   }
 
   function subjectCell(t) {
-    const text = el('span', { class: t.loading ? 'text loading' : 'text', title: t.subject }, t.subject);
+    const badge = t.priority ? el('span', { class: 'prio', title: `Download priority ${t.priority}` }, `#${t.priority}`) : null;
+    const text = el('span', { class: t.loading ? 'text loading' : 'text', title: t.subject }, badge, el('span', { class: 'label' }, t.subject));
     return el('td', { class: 'subject' }, text);
   }
 
@@ -173,10 +177,26 @@
     const sort = state.sort[tab];
     const col = COLUMNS[tab].find((c) => c.key === sort.key) || COLUMNS[tab][0];
     const dir = sort.dir === 'asc' ? 1 : -1;
-    return [...list].sort((a, b) => {
+    // While something is selected, rows keep their place, so a row does not move under the pointer between
+    // clicks. New rows go to the end; the sort applies again once the selection is cleared.
+    const frozen = state.selected[tab].size > 0 ? state.frozenOrder[tab] : null;
+    if (!frozen) state.frozenOrder[tab] = null;
+    const sorted = [...list].sort((a, b) => {
+      // Prioritised threads are pinned on top, by priority.
+      const pa = a.priority || Infinity, pb = b.priority || Infinity;
+      if (pa !== pb) return pa - pb;
+      if (frozen) {
+        const ia = frozen.has(a.key) ? frozen.get(a.key) : Infinity;
+        const ib = frozen.has(b.key) ? frozen.get(b.key) : Infinity;
+        if (ia !== ib) return ia - ib;
+      }
       const x = col.sort(a), y = col.sort(b);
       return (x < y ? -1 : x > y ? 1 : 0) * dir;
     });
+    if (state.selected[tab].size > 0 && !frozen) {
+      state.frozenOrder[tab] = new Map(sorted.map((x, i) => [x.key, i]));
+    }
+    return sorted;
   }
 
   function renderHead() {
@@ -208,6 +228,7 @@
     const s = state.sort[state.tab];
     if (s.key === key) s.dir = s.dir === 'asc' ? 'desc' : 'asc';
     else { s.key = key; s.dir = 'asc'; }
+    state.frozenOrder[state.tab] = null;
     saveJSON('sort', state.sort);
     render();
   }
@@ -224,10 +245,10 @@
       } });
       checkbox.checked = sel.has(x.key);
       const tr = el('tr', {
-        class: [sel.has(x.key) ? 'selected' : '', x.last_error ? 'has-error' : ''].join(' ').trim(),
+        class: [sel.has(x.key) ? 'selected' : '', x.last_error ? 'has-error' : '', x.priority ? 'pinned' : ''].join(' ').trim(),
         dataset: { key: x.key },
         onclick: (e) => toggleSelect(x.key, { additive: e.ctrlKey || e.metaKey, range: e.shiftKey }),
-        ondblclick: () => openFolder(x),
+        ondblclick: () => { if (x.folder_exists) openFolder(x); },
         oncontextmenu: (e) => {
           e.preventDefault();
           if (!sel.has(x.key)) { sel.clear(); sel.add(x.key); render(); }
@@ -235,7 +256,12 @@
         },
       }, el('td', { class: 'sel' }, checkbox));
       for (const c of cols) tr.append(c.cell(x));
-      const folderBtn = el('button', { type: 'button', title: 'Show folder in File Station', onclick: (e) => { e.stopPropagation(); openFolder(x); } });
+      const folderBtn = el('button', {
+        type: 'button',
+        title: x.folder_exists ? 'Show folder in File Station' : NO_FOLDER_YET,
+        disabled: !x.folder_exists,
+        onclick: (e) => { e.stopPropagation(); openFolder(x); },
+      });
       folderBtn.innerHTML = ICONS.folder;
       const moreBtn = el('button', { type: 'button', title: 'More actions', 'aria-haspopup': 'menu', onclick: (e) => {
         e.stopPropagation();
@@ -262,7 +288,10 @@
         el('strong', {}, tab === 'threads' ? 'No threads tracked' : 'No boards tracked'),
         tab === 'threads'
           ? 'Paste a thread link above, or drop links anywhere in this window. Files are saved as they are posted until the thread is archived.'
-          : 'Paste a board link (like https://boards.4chan.org/wg/) above. Every new thread on the board is tracked automatically.');
+          : 'Paste a board link (like https://boards.4chan.org/wg/catalog) above. Every new thread on the board is tracked automatically.',
+        state.snapshot.save_exists
+          ? el('div', {}, el('button', { type: 'button', class: 'link-button', onclick: openRoot }, 'Open download folder'))
+          : null);
       empty.hidden = false;
     } else if (list.length === 0) {
       empty.replaceChildren(el('strong', {}, 'Nothing matches the filter'));
@@ -284,6 +313,12 @@
     pause.setAttribute('aria-pressed', String(paused));
     pause.textContent = paused ? 'Resume' : 'Pause';
     pause.title = paused ? 'Resume checking and downloading' : 'Pause all checking and downloading';
+
+    const rootOK = !!(snap.save_exists && snap.save_share_path);
+    for (const b of [$('#open-root'), $('#menu-open-root')]) {
+      b.disabled = !rootOK;
+      b.title = rootOK ? snap.save_path : 'The download folder does not exist yet';
+    }
 
     const selCount = state.selected[state.tab].size;
     $('#remove-selected').hidden = selCount === 0;
@@ -430,9 +465,9 @@
         if (boards === 0 && threads > 0 && state.tab !== 'threads') switchTab('threads');
       }
       for (const d of dups) {
-        toast(`Already tracking ${d.kind === 'thread' ? 'this thread' : 'this board'}.`, {
+        toast(`Already tracking ${d.kind === 'thread' ? 'this thread' : 'this board'}.`, d.folder_exists ? {
           action: { label: 'Show folder', run: () => openFolder({ share_path: d.share_path, save_to: d.save_to }) },
-        });
+        } : {});
       }
       if (invalid.length) {
         const shown = invalid.slice(0, 2).map((r) => `“${r.input.length > 60 ? r.input.slice(0, 57) + '…' : r.input}”`).join(', ');
@@ -519,8 +554,7 @@
       `Remove all ${tab}`);
     if (!ok) return;
     try {
-      const res = await api(`${tab}/clear`, { method: 'POST' });
-      for (const err of (res.errors || []).slice(0, 3)) toast(err.error, { error: true, timeout: 10000 });
+      await api(`${tab}/clear`, { method: 'POST' });
       state.selected[tab].clear();
       toast(`Removed all ${tab}.`);
       refreshSoon();
@@ -552,6 +586,23 @@
       return;
     }
     copyText(x.save_to).then((ok) => toast(ok ? `Folder path copied: ${x.save_to}` : x.save_to));
+  }
+
+  function openRoot() {
+    const snap = state.snapshot;
+    if (snap.save_exists) openFolder({ share_path: snap.save_share_path, save_to: snap.save_path });
+  }
+  $('#open-root').addEventListener('click', openRoot);
+
+  async function setPriority(list, mode) {
+    const keys = list.map((x) => x.key);
+    try {
+      if (mode === 'none') await api('threads/unprioritize', { method: 'POST', body: { keys } });
+      else await api('threads/prioritize', { method: 'POST', body: { keys, first: mode === 'first' } });
+      refreshSoon();
+    } catch (e) {
+      toast(e.message, { error: true });
+    }
   }
 
   function renameThread(t) {
@@ -596,6 +647,12 @@
     const entries = [];
     if (many) {
       const sel = selectedItems();
+      if (state.tab === 'threads') {
+        entries.push(btn(`Prioritize ${sel.length} threads`, () => setPriority(sel, 'last')));
+        entries.push(btn('Download these first', () => setPriority(sel, 'first')));
+        if (sel.some((s) => s.priority)) entries.push(btn('Remove priority', () => setPriority(sel, 'none')));
+        entries.push(el('hr'));
+      }
       entries.push(btn('Copy links', async () => {
         const ok = await copyText(sel.map((s) => s.url).join(','));
         toast(ok ? `Copied ${sel.length} links.` : 'Copying failed.', { error: !ok });
@@ -603,7 +660,13 @@
       entries.push(el('hr'));
       entries.push(btn(`Remove ${sel.length} ${state.tab}`, () => removeItems(sel), { class: 'danger' }));
     } else {
-      entries.push(btn('Show folder in File Station', () => openFolder(x)));
+      entries.push(btn('Show folder in File Station', () => openFolder(x),
+        x.folder_exists ? {} : { disabled: true, title: NO_FOLDER_YET }));
+      if (state.tab === 'threads') {
+        if (!x.priority) entries.push(btn('Prioritize', () => setPriority([x], 'last')));
+        if (x.priority !== 1) entries.push(btn('Download first', () => setPriority([x], 'first')));
+        if (x.priority) entries.push(btn('Remove priority', () => setPriority([x], 'none')));
+      }
       entries.push(btn('Open on 4chan', () => window.open(x.url, '_blank', 'noopener')));
       entries.push(btn('Copy link', async () => {
         const ok = await copyText(x.url);
@@ -661,6 +724,7 @@
   $('#main-menu').addEventListener('click', (e) => {
     const action = e.target.dataset.action;
     hideMenus();
+    if (action === 'open-root') openRoot();
     if (action === 'settings') openSettings();
     if (action === 'columns') openColumns();
     if (action === 'logs') openLogs();
@@ -681,15 +745,30 @@
 
   // ---------- Drag and drop ----------
 
-  let dragDepth = 0;
   const veil = $('#drop-veil');
-  const hasText = (e) => [...e.dataTransfer.types].some((t) => t === 'text/plain' || t === 'text/uri-list');
-  window.addEventListener('dragenter', (e) => { if (hasText(e)) { dragDepth++; veil.hidden = false; } });
-  window.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) veil.hidden = true; });
-  window.addEventListener('dragover', (e) => { if (hasText(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+  let veilTimer = null;
+  const hasText = (e) => e.dataTransfer && [...e.dataTransfer.types].some((t) => t === 'text/plain' || t === 'text/uri-list');
+  const hideVeil = () => { clearTimeout(veilTimer); veilTimer = null; veil.hidden = true; };
+  // Browsers send dragover continuously while dragging over the page; when they stop (drop, Esc, leaving the
+  // window or a cancelled drag), the veil goes away on its own.
+  const keepVeil = () => {
+    veil.hidden = false;
+    clearTimeout(veilTimer);
+    veilTimer = setTimeout(hideVeil, 300);
+  };
+  window.addEventListener('dragenter', (e) => { if (hasText(e)) keepVeil(); });
+  window.addEventListener('dragover', (e) => {
+    if (!hasText(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    keepVeil();
+  });
+  window.addEventListener('dragleave', (e) => { if (!e.relatedTarget) hideVeil(); });
+  window.addEventListener('dragend', hideVeil);
+  window.addEventListener('blur', hideVeil);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideVeil(); });
   window.addEventListener('drop', (e) => {
-    dragDepth = 0;
-    veil.hidden = true;
+    hideVeil();
     if (!hasText(e)) return;
     e.preventDefault();
     const text = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
@@ -725,8 +804,18 @@
   function syncSettingsForm() {
     const f = $('#settings-form').elements;
     f.save_thumbnails.disabled = !f.save_html.checked;
-    f.thread_folder_name_format.disabled = !f.add_thread_subject_to_folder.checked;
   }
+
+  // ---------- Theme ----------
+
+  function applyTheme(theme) {
+    const t = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+    saveJSON('theme', { value: t });
+  }
+  // The last used theme right away, to avoid a flash; the saved setting once it has loaded.
+  applyTheme(loadJSON('theme', { value: 'light' }).value);
+  api('settings').then((s) => applyTheme(s.theme)).catch(() => {});
   $('#settings-form').addEventListener('change', syncSettingsForm);
 
   $('#settings-form').addEventListener('submit', async (e) => {
@@ -736,13 +825,13 @@
     const body = {
       save_path: f.save_path.value.trim(),
       image_filename_format: Number(f.image_filename_format.value),
-      thread_folder_name_format: Number(f.thread_folder_name_format.value),
-      add_thread_subject_to_folder: f.add_thread_subject_to_folder.checked,
+      folder_name: Number(f.folder_name.value),
+      theme: f.theme.value,
       save_html: f.save_html.checked,
       save_thumbnails: f.save_thumbnails.checked,
       min_seconds_between_scrapes: Number(f.min_seconds_between_scrapes.value),
       max_concurrent_downloads: Number(f.max_concurrent_downloads.value),
-      max_1_request_per_second: f.max_1_request_per_second.checked,
+      space_downloads: f.space_downloads.checked,
       user_agent: f.user_agent.value.trim(),
       keep_lists: f.keep_lists.checked,
       start_paused: f.start_paused.checked,
@@ -750,7 +839,8 @@
     const save = $('#settings-save');
     save.disabled = true;
     try {
-      await api('settings', { method: 'POST', body });
+      const saved = await api('settings', { method: 'POST', body });
+      applyTheme(saved.theme);
       $('#settings-dialog').close('save');
       toast('Settings saved.');
       refreshSoon();
@@ -802,6 +892,31 @@
   }
   $('#log-refresh').addEventListener('click', loadLogs);
 
+  async function fullLog() {
+    const { lines } = await api('logs', { query: { lines: 5000 } });
+    return lines.join('\n') + '\n';
+  }
+  $('#log-copy').addEventListener('click', async () => {
+    try {
+      const ok = await copyText(await fullLog());
+      toast(ok ? 'Log copied.' : 'Copying failed.', { error: !ok });
+    } catch (e) {
+      toast(e.message, { error: true });
+    }
+  });
+  $('#log-download').addEventListener('click', async () => {
+    try {
+      const blob = new Blob([await fullLog()], { type: 'text/plain' });
+      const a = el('a', { href: URL.createObjectURL(blob), download: `synochan-${new Date().toISOString().slice(0, 10)}.log` });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    } catch (e) {
+      toast(e.message, { error: true });
+    }
+  });
+
   async function openAbout() {
     const facts = $('#about-facts');
     facts.replaceChildren();
@@ -811,7 +926,8 @@
       $('#about-version').textContent = info.author ? `Version ${info.version} · by ${info.author}` : `Version ${info.version}`;
       if (/^https:\/\//.test(info.repo_url || '')) {
         $('#about-repo').href = info.repo_url;
-        $('#about-issues').href = info.repo_url + '/issues';
+        const body = `**SynoChan version:** ${info.version}\n**Platform:** ${info.arch}\n\n**What happened:**\n\n\n**What you expected:**\n\n\n**Steps to reproduce:**\n\n`;
+        $('#about-issues').href = info.repo_url + '/issues/new?body=' + encodeURIComponent(body);
         $('#about-releases').href = info.repo_url + '/releases';
         $('#about-links').hidden = false;
       }
@@ -823,6 +939,41 @@
   }
 
   // ---------- DSM window ----------
+
+  // Writing assistant extensions (Grammarly) attach to text fields and insert their own elements into the DSM
+  // window around this frame, which breaks DSM's window sizing. Opt every field out.
+  for (const field of document.querySelectorAll('input[type="text"], input[type="search"], input[type="number"], textarea')) {
+    field.setAttribute('data-gramm', 'false');
+    field.setAttribute('data-gramm_editor', 'false');
+    field.setAttribute('data-enable-grammarly', 'false');
+  }
+
+  // DSM measures a window's border from the first child of its frame wrapper and expects its own border element
+  // there. If an extension still inserts an element in front of it, maximize and resize fail for this window
+  // ("Cannot read properties of null (reading 'getFrameWidth')"). Keep DSM's element first.
+  (function keepWindowFrameOrder() {
+    let frame;
+    try {
+      frame = window.frameElement;
+    } catch (e) {
+      return;
+    }
+    const bwrap = frame && frame.closest ? frame.closest('.x-window-bwrap') : null;
+    if (!bwrap || typeof MutationObserver !== 'function') return;
+
+    let fixes = 0;
+    const fix = () => {
+      const own = Array.from(bwrap.children).find((n) => n.classList.contains('x-window-ml'));
+      if (!own || bwrap.firstChild === own) return;
+      // Stop if something keeps moving it back, rather than fight it in a loop.
+      if (++fixes > 50) return;
+      bwrap.insertBefore(own, bwrap.firstChild);
+    };
+    fix();
+    const observer = new MutationObserver(fix);
+    observer.observe(bwrap, { childList: true });
+    window.addEventListener('pagehide', () => observer.disconnect());
+  })();
 
   // An iframe swallows mouse events. When a DSM window is dragged or resized across it, DSM never sees the mouse
   // move or the button release and the drag gets stuck, which blocks moving and resizing every window. So while

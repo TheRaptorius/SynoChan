@@ -72,8 +72,11 @@ func TestExtractSubject(t *testing.T) {
 		{"named poster", Post{Name: strp("Bob"), Com: strp("hi")}, "Bob"},
 		{"anonymous uses short comment", Post{Name: strp("Anonymous"), Com: strp("short &quot;one&quot;")}, `short one`},
 		{"no name uses comment", Post{Com: strp("short")}, "short"},
-		{"multi line comment skipped", Post{Name: strp("Anonymous"), Com: strp("a<br>b")}, ""},
-		{"long comment skipped", Post{Name: strp("Anonymous"), Com: strp(strings.Repeat("x", 64))}, ""},
+		{"multi line comment joined", Post{Name: strp("Anonymous"), Com: strp("a<br>b")}, "a b"},
+		{"long comment cut at a word", Post{Name: strp("Anonymous"), Com: strp("Post your favourite mechanical keyboards and the switches you use daily")}, "Post your favourite mechanical keyboards"},
+		{"reply links and urls removed", Post{Com: strp(`<a href="#p1" class="quotelink">&gt;&gt;123</a><br>Look at https://example.com/x this`)}, "Look at this"},
+		{"greentext arrows dropped", Post{Com: strp(`<span class="quote">&gt;be me</span><br>&gt;mfw`)}, "be me mfw"},
+		{"empty subject falls back", Post{Sub: strp("  "), Com: strp("from the text")}, "from the text"},
 		{"illegal characters removed", Post{Sub: strp(`a/b\c:d*e?f"g<h>i|j`)}, "abcdefghij"},
 		{"trailing dots trimmed", Post{Sub: strp("Ends with dots...")}, "Ends with dots"},
 	}

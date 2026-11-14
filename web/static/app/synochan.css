@@ -24,25 +24,24 @@ html.synochan {
   line-height: 1.45;
 }
 
-@media (prefers-color-scheme: dark) {
-  html.synochan {
-    color-scheme: dark;
-    --tile: #161915;
-    --surface: #1e221d;
-    --sunk: #191c18;
-    --line: #333a31;
-    --ink: #e3e8e0;
-    --ink-soft: #a0a99d;
-    --letter: #7a8177;
-    --clover: #78bf61;
-    --clover-deep: #a6db93;
-    --leaf: #2c4524;
-    --leaf-faint: #223220;
-    --alert: #ee8a73;
-    --alert-faint: #3a221c;
-    --focus: #78bf61;
-    --shadow: 0 6px 24px rgb(0 0 0 / 0.5);
-  }
+/* Dark theme, chosen in the settings. DSM itself has no dark theme, so light is the default. */
+html.synochan[data-theme="dark"] {
+  color-scheme: dark;
+  --tile: #161915;
+  --surface: #1e221d;
+  --sunk: #191c18;
+  --line: #333a31;
+  --ink: #e3e8e0;
+  --ink-soft: #a0a99d;
+  --letter: #7a8177;
+  --clover: #78bf61;
+  --clover-deep: #a6db93;
+  --leaf: #2c4524;
+  --leaf-faint: #223220;
+  --alert: #ee8a73;
+  --alert-faint: #3a221c;
+  --focus: #78bf61;
+  --shadow: 0 6px 24px rgb(0 0 0 / 0.5);
 }
 
 html.synochan * { box-sizing: border-box; }
@@ -68,7 +67,7 @@ html.synochan button {
 html.synochan button:hover { border-color: var(--letter); }
 html.synochan button.primary { background: var(--clover); border-color: var(--clover); color: #fff; font-weight: 600; }
 html.synochan button.primary:hover { background: var(--clover-deep); border-color: var(--clover-deep); }
-@media (prefers-color-scheme: dark) { html.synochan button.primary { color: #10170e; } }
+html.synochan[data-theme="dark"] button.primary { color: #10170e; }
 html.synochan button.quiet { background: transparent; border-color: transparent; color: var(--ink-soft); }
 html.synochan button.quiet:hover { color: var(--ink); background: var(--sunk); }
 html.synochan button.danger { color: var(--alert); }
@@ -270,3 +269,25 @@ html.synochan #columns-list { display: grid; gap: 6px; }
   html.synochan .bar { flex-wrap: wrap; }
   html.synochan .add { flex-basis: 100%; }
 }
+
+/* Toolbar buttons look like buttons, not links. */
+html.synochan .tab-tools button { background: var(--surface); border-color: var(--line); color: var(--ink); padding: 3px 10px; }
+html.synochan .tab-tools button:hover { border-color: var(--letter); }
+html.synochan .tab-tools button.danger { color: var(--alert); }
+html.synochan .tab-tools button.danger:hover { border-color: var(--alert); background: var(--alert-faint); }
+html.synochan button[disabled], html.synochan .menu button[disabled] { opacity: 0.45; cursor: default; }
+html.synochan .menu button[disabled]:hover { background: transparent; }
+
+/* Priority badge and pinned rows. */
+html.synochan .prio {
+  display: inline-block; min-width: 2.2em; margin-right: 6px; padding: 0 5px;
+  border-radius: 99px; background: var(--clover); color: #fff;
+  font-size: 11px; font-weight: 700; text-align: center; vertical-align: 1px;
+}
+html.synochan[data-theme="dark"] .prio { color: #10170e; }
+html.synochan tbody tr.pinned td { background: var(--leaf-faint); }
+html.synochan tbody tr.pinned.selected td { background: var(--leaf); }
+html.synochan td.subject .text { display: flex; align-items: baseline; min-width: 0; }
+html.synochan td.subject .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html.synochan .empty .link-button { margin-top: 12px; }
+html.synochan .hint { color: var(--ink-soft); font-size: 12px; }

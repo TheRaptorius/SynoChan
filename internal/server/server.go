@@ -42,6 +42,8 @@ func New(m *core.Manager, info Info) http.Handler {
 	mux.HandleFunc("POST /api/threads/remove", h.removeThreads)
 	mux.HandleFunc("POST /api/threads/rename", h.renameThread)
 	mux.HandleFunc("POST /api/threads/clear", h.clearThreads)
+	mux.HandleFunc("POST /api/threads/prioritize", h.prioritize)
+	mux.HandleFunc("POST /api/threads/unprioritize", h.unprioritize)
 	mux.HandleFunc("POST /api/boards/remove", h.removeBoards)
 	mux.HandleFunc("POST /api/boards/clear", h.clearBoards)
 	mux.HandleFunc("POST /api/pause", h.pause)
@@ -152,18 +154,45 @@ func (h *handler) renameThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.m.RenameThread(req.Key, req.Subject); err != nil {
-		writeError(w, http.StatusNotFound, err)
+		status := http.StatusInternalServerError
+		if errors.Is(err, core.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 func (h *handler) clearThreads(w http.ResponseWriter, r *http.Request) {
-	var errs []itemError
-	for _, err := range h.m.ClearThreads() {
-		errs = append(errs, itemError{Error: err.Error()})
+	h.m.ClearThreads()
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *handler) prioritize(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Keys  []string `json:"keys"`
+		First bool     `json:"first"`
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"errors": errs})
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.m.Prioritize(req.Keys, req.First); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func (h *handler) unprioritize(w http.ResponseWriter, r *http.Request) {
+	var req keysRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	h.m.Unprioritize(req.Keys)
+	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
 func (h *handler) removeBoards(w http.ResponseWriter, r *http.Request) {

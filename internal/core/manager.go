@@ -4,8 +4,9 @@ package core
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
+	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,9 +21,6 @@ import (
 // PeriodicSaveInterval is how often changed state is written while running, so little is lost on a crash.
 const PeriodicSaveInterval = time.Minute
 
-// removalWait is how long a removal waits for the thread's downloads in flight before renaming its folder.
-const removalWait = 15 * time.Second
-
 // Options configure a Manager.
 type Options struct {
 	Config    *config.Store
@@ -30,6 +28,8 @@ type Options struct {
 	Endpoints fourchan.Endpoints
 	StatePath string // Where tracked lists are kept. Empty disables persistence.
 	Logger    *slog.Logger
+	// TrackerSpacing overrides the one second between API requests (tests only).
+	TrackerSpacing time.Duration
 }
 
 // Manager owns the tracked threads and boards and the work queue.
@@ -73,12 +73,13 @@ func New(opts Options) *Manager {
 		boardByKey:  make(map[string]*Board),
 	}
 	m.q = queue.New(queue.Options{
-		Limits: func() (int, bool) {
+		Limits: func() queue.Limits {
 			s := m.cfg.Get()
-			return s.MaxConcurrentDownloads, s.Max1RequestPerSecond
+			return queue.Limits{MaxDownloads: s.MaxConcurrentDownloads, SpaceDownloads: s.SpaceDownloads}
 		},
-		AddTrackers: m.addTrackers,
-		Logger:      opts.Logger,
+		AddTrackers:    m.addTrackers,
+		TrackerSpacing: opts.TrackerSpacing,
+		Logger:         opts.Logger,
 	})
 	return m
 }
@@ -209,12 +210,13 @@ func (m *Manager) saveLogged() {
 
 // AddResult reports what happened to one entered URL.
 type AddResult struct {
-	Input     string `json:"input"`
-	Status    string `json:"status"` // "added", "duplicate" or "invalid"
-	Kind      string `json:"kind,omitempty"`
-	Key       string `json:"key,omitempty"`
-	SaveTo    string `json:"save_to,omitempty"`
-	SharePath string `json:"share_path,omitempty"`
+	Input        string `json:"input"`
+	Status       string `json:"status"` // "added", "duplicate" or "invalid"
+	Kind         string `json:"kind,omitempty"`
+	Key          string `json:"key,omitempty"`
+	SaveTo       string `json:"save_to,omitempty"`
+	SharePath    string `json:"share_path,omitempty"`
+	FolderExists bool   `json:"folder_exists,omitempty"`
 }
 
 // AddURLs adds every thread and board URL found in text. Entries may be separated by commas, spaces or new lines.
@@ -228,31 +230,33 @@ func (m *Manager) AddURLs(text string) []AddResult {
 		if ref, ok := fourchan.ParseThreadURL(input); ok {
 			key := threadKey(fourchan.SiteName, ref.Board, ref.ID)
 			if existing, dup := m.threadByKey[key]; dup {
-				results = append(results, AddResult{Input: input, Status: "duplicate", Kind: "thread", Key: key, SaveTo: existing.SaveTo, SharePath: SharePath(existing.SaveTo)})
+				v := existing.view(0)
+				results = append(results, AddResult{Input: input, Status: "duplicate", Kind: "thread", Key: key, SaveTo: v.SaveTo, SharePath: v.SharePath, FolderExists: v.FolderExists})
 				continue
 			}
-			t := m.newThread(ref.Board, ref.ID, threadSaveDir(s.SavePath, ref.Board, ref.ID))
-			t.priority = queue.High
+			t := m.newThread(ref.Board, ref.ID, s.SavePath)
+			t.lane = queue.High
 			if ref.Subject != "" {
 				t.subject, t.subjectSet = ref.Subject, true
 			}
 			m.threads = append(m.threads, t)
 			m.threadByKey[key] = t
 			toQueue = append(toQueue, t)
-			results = append(results, AddResult{Input: input, Status: "added", Kind: "thread", Key: key, SaveTo: t.SaveTo, SharePath: SharePath(t.SaveTo)})
+			results = append(results, AddResult{Input: input, Status: "added", Kind: "thread", Key: key})
 			continue
 		}
 		if code, ok := fourchan.ParseBoardURL(input); ok {
 			key := boardKey(fourchan.SiteName, code)
 			if existing, dup := m.boardByKey[key]; dup {
-				results = append(results, AddResult{Input: input, Status: "duplicate", Kind: "board", Key: key, SaveTo: existing.SaveTo, SharePath: SharePath(existing.SaveTo)})
+				v := existing.view(0)
+				results = append(results, AddResult{Input: input, Status: "duplicate", Kind: "board", Key: key, SaveTo: v.SaveTo, SharePath: v.SharePath, FolderExists: v.FolderExists})
 				continue
 			}
 			b := m.newBoard(code, boardSaveDir(s.SavePath, code))
 			m.boards = append(m.boards, b)
 			m.boardByKey[key] = b
 			toQueue = append(toQueue, b)
-			results = append(results, AddResult{Input: input, Status: "added", Kind: "board", Key: key, SaveTo: b.SaveTo, SharePath: SharePath(b.SaveTo)})
+			results = append(results, AddResult{Input: input, Status: "added", Kind: "board", Key: key})
 			continue
 		}
 		results = append(results, AddResult{Input: input, Status: "invalid"})
@@ -310,7 +314,7 @@ func (m *Manager) addTrackers(source queue.Item, items []queue.Item, onAdded fun
 // ErrNotFound is returned for unknown keys.
 var ErrNotFound = errors.New("not tracked")
 
-// RemoveThread stops tracking a thread and, when enabled, renames its folder to include the subject.
+// RemoveThread stops tracking a thread. Its folder and files stay.
 func (m *Manager) RemoveThread(key string) error {
 	m.mu.Lock()
 	t := m.threadByKey[key]
@@ -318,12 +322,12 @@ func (m *Manager) RemoveThread(key string) error {
 	if t == nil {
 		return ErrNotFound
 	}
-	return m.removeThread(t, true)
+	m.removeThread(t)
+	return nil
 }
 
-func (m *Manager) removeThread(t *Thread, manual bool) error {
+func (m *Manager) removeThread(t *Thread) {
 	t.cancel()
-
 	m.mu.Lock()
 	if m.threadByKey[t.Key()] == t {
 		delete(m.threadByKey, t.Key())
@@ -335,65 +339,24 @@ func (m *Manager) removeThread(t *Thread, manual bool) error {
 		}
 	}
 	m.mu.Unlock()
+	m.renumberPriorities()
 	m.q.Purge()
 	m.touch()
 	m.saveLogged()
-
-	s := m.cfg.Get()
-	if !s.AddThreadSubjectToFolder {
-		return nil
-	}
-
-	// Let downloads in flight stop before the folder is moved, so none lands in the old place.
-	done := make(chan struct{})
-	go func() {
-		t.active.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(removalWait):
-		m.log.Warn("downloads still running, renaming folder anyway", "thread", t.Key())
-	}
-
-	newPath, err := moveThreadDir(t.SaveTo, t.DisplaySubject(), t.ID, s.ThreadFolderNameFormat)
-	if err != nil {
-		m.log.Error("could not rename thread folder", "thread", t.Key(), "manual", manual, "err", err)
-		return fmt.Errorf("thread removed, but its folder could not be renamed: %w", err)
-	}
-	if newPath != "" {
-		m.log.Info("renamed thread folder", "thread", t.Key(), "to", newPath)
-	}
-	return nil
 }
 
-// ClearThreads removes all threads. Folder rename errors are collected, removal continues.
-func (m *Manager) ClearThreads() []error {
+// ClearThreads removes all threads.
+func (m *Manager) ClearThreads() {
 	m.mu.Lock()
-	all := append([]*Thread(nil), m.threads...)
-	m.mu.Unlock()
-
-	var (
-		wg   sync.WaitGroup
-		emu  sync.Mutex
-		errs []error
-	)
-	sem := make(chan struct{}, 8)
-	for _, t := range all {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if err := m.removeThread(t, true); err != nil {
-				emu.Lock()
-				errs = append(errs, fmt.Errorf("%s: %w", t.Key(), err))
-				emu.Unlock()
-			}
-		}()
+	for _, t := range m.threads {
+		t.cancel()
 	}
-	wg.Wait()
-	return errs
+	m.threads = nil
+	m.threadByKey = make(map[string]*Thread)
+	m.mu.Unlock()
+	m.q.Purge()
+	m.touch()
+	m.saveLogged()
 }
 
 // RemoveBoard stops tracking a board. Threads it added stay tracked.
@@ -441,9 +404,123 @@ func (m *Manager) RenameThread(key, subject string) error {
 	if t == nil {
 		return ErrNotFound
 	}
-	t.SetSubject(subject)
+	err := t.SetSubject(subject)
+	m.saveLogged()
+	return err
+}
+
+// Prioritize gives threads a download priority, in the order given. With first, they go before all
+// prioritised threads, otherwise after them. Already prioritised threads are moved.
+func (m *Manager) Prioritize(keys []string, first bool) error {
+	m.mu.Lock()
+	var picked []*Thread
+	seen := map[*Thread]bool{}
+	for _, k := range keys {
+		if t := m.threadByKey[k]; t != nil && !seen[t] {
+			picked = append(picked, t)
+			seen[t] = true
+		}
+	}
+	if len(picked) == 0 {
+		m.mu.Unlock()
+		return ErrNotFound
+	}
+	var others []*Thread
+	for _, t := range m.prioritizedLocked() {
+		if !seen[t] {
+			others = append(others, t)
+		}
+	}
+	ordered := append(others, picked...)
+	if first {
+		ordered = append(picked, others...)
+	}
+	for i, t := range ordered {
+		t.mu.Lock()
+		t.prio = i + 1
+		if seen[t] {
+			// Check right away, so the priority covers the thread's current files.
+			t.prioChecked = false
+			t.lastAttempt = time.Time{}
+		}
+		t.mu.Unlock()
+	}
+	m.mu.Unlock()
+	for _, t := range picked {
+		m.q.Enqueue(t)
+	}
+	m.q.Wake()
+	m.touch()
 	m.saveLogged()
 	return nil
+}
+
+// Unprioritize removes threads' download priority.
+func (m *Manager) Unprioritize(keys []string) {
+	m.mu.Lock()
+	for _, k := range keys {
+		if t := m.threadByKey[k]; t != nil {
+			t.mu.Lock()
+			t.prio = 0
+			t.mu.Unlock()
+		}
+	}
+	m.mu.Unlock()
+	m.renumberPriorities()
+	m.q.Wake()
+	m.touch()
+	m.saveLogged()
+}
+
+// prioritizedLocked returns the prioritised threads by priority.
+func (m *Manager) prioritizedLocked() []*Thread {
+	var out []*Thread
+	for _, t := range m.threads {
+		t.mu.Lock()
+		p := t.prio
+		t.mu.Unlock()
+		if p > 0 {
+			out = append(out, t)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		out[i].mu.Lock()
+		a := out[i].prio
+		out[i].mu.Unlock()
+		out[j].mu.Lock()
+		b := out[j].prio
+		out[j].mu.Unlock()
+		return a < b
+	})
+	return out
+}
+
+// renumberPriorities closes gaps, so priorities stay 1, 2, 3, ….
+func (m *Manager) renumberPriorities() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, t := range m.prioritizedLocked() {
+		t.mu.Lock()
+		t.prio = i + 1
+		t.mu.Unlock()
+	}
+}
+
+// checkPriorityDone ends a thread's priority once a check finished after it was prioritised and every file
+// found so far is saved (or given up on). Files found by later checks before that keep the priority going.
+func (m *Manager) checkPriorityDone(t *Thread) {
+	t.mu.Lock()
+	done := t.prio > 0 && t.prioChecked && t.fileCountKnown && t.pendingLocked() == 0
+	if done {
+		t.prio = 0
+	}
+	t.mu.Unlock()
+	if done {
+		m.log.Info("priority download finished", "thread", t.Key())
+		m.renumberPriorities()
+		m.touch()
+		m.saveLogged()
+	}
 }
 
 // SetPaused pauses or resumes all scraping and downloading.
@@ -470,6 +547,7 @@ func (m *Manager) UpdateSettings(s config.Settings) error {
 		return err
 	}
 	m.q.Purge() // Thumbnails stop being wanted when they are turned off.
+	m.q.Wake()  // Download limits may have changed.
 	m.touch()
 	if s.KeepLists && !old.KeepLists {
 		// Save everything now, so trackers added while saving was off are kept too.
@@ -480,10 +558,14 @@ func (m *Manager) UpdateSettings(s config.Settings) error {
 
 // Snapshot is everything the UI shows.
 type Snapshot struct {
-	Rev     uint64       `json:"rev"`
-	Queue   queue.Status `json:"queue"`
-	Threads []ThreadView `json:"threads"`
-	Boards  []BoardView  `json:"boards"`
+	Rev   uint64       `json:"rev"`
+	Queue queue.Status `json:"queue"`
+	// Save folder for newly added threads and boards.
+	SavePath      string       `json:"save_path"`
+	SaveSharePath string       `json:"save_share_path,omitempty"`
+	SaveExists    bool         `json:"save_exists"`
+	Threads       []ThreadView `json:"threads"`
+	Boards        []BoardView  `json:"boards"`
 }
 
 // Snapshot returns the current state for display.
@@ -495,17 +577,23 @@ func (m *Manager) Snapshot() Snapshot {
 	boards := append([]*Board(nil), m.boards...)
 	m.mu.Unlock()
 
+	savePath := m.cfg.Get().SavePath
 	s := Snapshot{
-		Rev:     rev,
-		Queue:   m.q.Status(),
-		Threads: make([]ThreadView, 0, len(threads)),
-		Boards:  make([]BoardView, 0, len(boards)),
+		Rev:           rev,
+		Queue:         m.q.Status(),
+		SavePath:      savePath,
+		SaveSharePath: SharePath(savePath),
+		Threads:       make([]ThreadView, 0, len(threads)),
+		Boards:        make([]BoardView, 0, len(boards)),
 	}
 	for _, t := range threads {
 		s.Threads = append(s.Threads, t.view(interval))
 	}
 	for _, b := range boards {
 		s.Boards = append(s.Boards, b.view(interval))
+	}
+	if info, err := os.Stat(savePath); err == nil && info.IsDir() {
+		s.SaveExists = true
 	}
 	return s
 }

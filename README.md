@@ -5,12 +5,16 @@
 SynoChan, by TheRaptorius, archives 4chan threads and boards on a Synology NAS. It runs as a native DSM 7 package and opens as a window inside DSM.
 
 - Track threads: every file is saved as it is posted, until the thread is archived or deleted.
-- Track boards: every new thread on the board is tracked automatically.
+- Track boards: every new thread on the board is tracked automatically. Threads you remove stay removed.
+- Prioritise threads that are about to disappear: their files are downloaded before everything else.
+- Folders named by thread number, number and subject, or subject and number. Threads without a subject
+  get one from the start of the opening post.
 - Optionally save the thread page (`Thread.html`) with links rewritten to the saved files.
 - Choose how files are named: post number, original name, or both.
-- Optionally rename a thread's folder to include its subject when the thread is removed.
-- Conditional requests, request spacing, back-off on rate limiting and automatic retries.
-- Lists survive restarts. Settings, filters, sorting and columns in the UI.
+- Follows the [4chan API rules](https://github.com/4chan/4chan-API): at most one API request per second,
+  at least 10 seconds between checks of a thread, conditional requests. Files download in parallel.
+- Back-off on rate limiting and automatic retries. Lists survive restarts.
+- Light and dark theme, filters, sorting and columns in the UI.
 
 It is a single static Go binary with no dependencies, so it runs on x86_64, ARMv8 (aarch64), ARMv7 and i686 models.
 
